@@ -6,11 +6,15 @@ import {
   messages,
   projects,
   subscriptions,
+  userAccess,
+  purchases,
   type User,
   type Conversation,
   type Message,
   type Project,
   type Subscription,
+  type UserAccess,
+  type Purchase,
 } from "./schema";
 import type { Attachment } from "@/lib/types/attachment";
 
@@ -295,4 +299,118 @@ export async function upsertSubscription(data: {
     })
     .returning();
   return subscription;
+}
+
+// ─── User Access ─────────────────────────────────────────────────────────────
+
+export async function getUserAccess(
+  userId: string
+): Promise<UserAccess | undefined> {
+  const [access] = await db
+    .select()
+    .from(userAccess)
+    .where(eq(userAccess.userId, userId));
+  return access;
+}
+
+export async function upsertUserAccess(
+  userId: string,
+  data: Partial<{
+    continuousExpiresAt: Date | null;
+    pausableRemainingSeconds: number;
+    pausableStatus: string;
+    pausableLastResumedAt: Date | null;
+  }>
+): Promise<UserAccess> {
+  const [access] = await db
+    .insert(userAccess)
+    .values({
+      userId,
+      continuousExpiresAt: data.continuousExpiresAt ?? null,
+      pausableRemainingSeconds: data.pausableRemainingSeconds ?? 0,
+      pausableStatus: data.pausableStatus ?? "none",
+      pausableLastResumedAt: data.pausableLastResumedAt ?? null,
+    })
+    .onConflictDoUpdate({
+      target: userAccess.userId,
+      set: {
+        ...data,
+        updatedAt: new Date(),
+      },
+    })
+    .returning();
+  return access;
+}
+
+export async function updateUserAccess(
+  userId: string,
+  data: Partial<{
+    continuousExpiresAt: Date | null;
+    pausableRemainingSeconds: number;
+    pausableStatus: string;
+    pausableLastResumedAt: Date | null;
+  }>
+): Promise<UserAccess | undefined> {
+  const [access] = await db
+    .update(userAccess)
+    .set({ ...data, updatedAt: new Date() })
+    .where(eq(userAccess.userId, userId))
+    .returning();
+  return access;
+}
+
+// ─── Purchases ───────────────────────────────────────────────────────────────
+
+export async function createPurchase(data: {
+  userId: string;
+  passType: string;
+  amountUsd: string;
+  paypalOrderId: string;
+}): Promise<Purchase> {
+  const [purchase] = await db
+    .insert(purchases)
+    .values({
+      userId: data.userId,
+      passType: data.passType,
+      amountUsd: data.amountUsd,
+      paypalOrderId: data.paypalOrderId,
+      status: "pending",
+    })
+    .returning();
+  return purchase;
+}
+
+export async function getPurchaseByOrderId(
+  paypalOrderId: string
+): Promise<Purchase | undefined> {
+  const [purchase] = await db
+    .select()
+    .from(purchases)
+    .where(eq(purchases.paypalOrderId, paypalOrderId));
+  return purchase;
+}
+
+export async function updatePurchaseStatus(
+  paypalOrderId: string,
+  status: string,
+  paypalCaptureId?: string
+): Promise<Purchase | undefined> {
+  const set: Record<string, unknown> = { status };
+  if (paypalCaptureId) set.paypalCaptureId = paypalCaptureId;
+  const [purchase] = await db
+    .update(purchases)
+    .set(set)
+    .where(eq(purchases.paypalOrderId, paypalOrderId))
+    .returning();
+  return purchase;
+}
+
+export async function getUserPurchases(
+  userId: string
+): Promise<Purchase[]> {
+  return db
+    .select()
+    .from(purchases)
+    .where(eq(purchases.userId, userId))
+    .orderBy(desc(purchases.createdAt));
 }
