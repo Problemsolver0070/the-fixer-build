@@ -12,6 +12,13 @@ interface AppLayoutClientProps {
   plan: string;
   trialExpiresAt: string | null;
   conversations: SidebarConversation[];
+  accessData: {
+    continuousRemaining: number;
+    pausableRemaining: number;
+    pausableStatus: "none" | "active" | "paused";
+    trialActive: boolean;
+    trialRemaining: number;
+  };
   children: React.ReactNode;
 }
 
@@ -19,6 +26,7 @@ export function AppLayoutClient({
   plan,
   trialExpiresAt,
   conversations,
+  accessData,
   children,
 }: AppLayoutClientProps) {
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -26,7 +34,10 @@ export function AppLayoutClient({
   return (
     <div className="flex h-screen flex-col overflow-hidden">
       <TrialBanner plan={plan} trialExpiresAt={trialExpiresAt} />
-      <NavBar onToggleSidebar={() => setSidebarOpen((prev) => !prev)} />
+      <NavBar
+        onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
+        accessData={accessData}
+      />
       <div className="flex flex-1 overflow-hidden">
         <AppSidebar
           conversations={conversations}

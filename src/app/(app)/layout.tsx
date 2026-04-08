@@ -1,9 +1,9 @@
 export const dynamic = "force-dynamic";
 
-import { auth, currentUser } from "@clerk/nextjs/server";
+import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
-import { getUserByClerkId } from "@/lib/db/queries";
-import { getConversations } from "@/lib/db/queries";
+import { getUserByClerkId, getConversations, getUserAccess } from "@/lib/db/queries";
+import { computeAccessState } from "@/lib/access/check";
 import { AppLayoutClient } from "./app-layout-client";
 
 export default async function AppLayout({
@@ -14,26 +14,49 @@ export default async function AppLayout({
   const { userId: clerkId } = await auth();
   if (!clerkId) redirect("/sign-in");
 
-  const clerkUser = await currentUser();
   const dbUser = await getUserByClerkId(clerkId);
 
-  // If the webhook hasn't fired yet, the user won't exist in our DB.
-  // Redirect to a holding state — the webhook will create them shortly.
   if (!dbUser) {
-    // In production, you might show a brief loading screen.
-    // For now, we'll still render the shell with safe defaults.
     return (
       <AppLayoutClient
         plan="trial"
         trialExpiresAt={null}
         conversations={[]}
+        accessData={{
+          continuousRemaining: 0,
+          pausableRemaining: 0,
+          pausableStatus: "none",
+          trialActive: false,
+          trialRemaining: 0,
+        }}
       >
         {children}
       </AppLayoutClient>
     );
   }
 
-  const conversations = await getConversations(dbUser.id);
+  const [conversations, access] = await Promise.all([
+    getConversations(dbUser.id),
+    getUserAccess(dbUser.id),
+  ]);
+
+  const state = computeAccessState(
+    access ?? null,
+    dbUser.trialExpiresAt
+  );
+
+  const trialActive =
+    dbUser.plan === "trial" &&
+    dbUser.trialExpiresAt !== null &&
+    new Date(dbUser.trialExpiresAt) > new Date();
+  const trialRemaining = trialActive
+    ? Math.max(
+        0,
+        Math.floor(
+          (new Date(dbUser.trialExpiresAt!).getTime() - Date.now()) / 1000
+        )
+      )
+    : 0;
 
   const serializedConversations = conversations.map((c) => ({
     id: c.id,
@@ -47,6 +70,13 @@ export default async function AppLayout({
       plan={dbUser.plan}
       trialExpiresAt={dbUser.trialExpiresAt?.toISOString() ?? null}
       conversations={serializedConversations}
+      accessData={{
+        continuousRemaining: state.continuousRemaining,
+        pausableRemaining: state.pausableRemaining,
+        pausableStatus: state.pausableStatus,
+        trialActive,
+        trialRemaining,
+      }}
     >
       {children}
     </AppLayoutClient>

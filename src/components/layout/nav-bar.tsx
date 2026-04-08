@@ -5,12 +5,20 @@ import { usePathname } from "next/navigation";
 import { UserButton } from "@clerk/nextjs";
 import { Menu, MessageSquare, Hammer } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { AccessTimer } from "@/components/billing/access-timer";
 
 interface NavBarProps {
   onToggleSidebar: () => void;
+  accessData: {
+    continuousRemaining: number;
+    pausableRemaining: number;
+    pausableStatus: "none" | "active" | "paused";
+    trialActive: boolean;
+    trialRemaining: number;
+  };
 }
 
-export function NavBar({ onToggleSidebar }: NavBarProps) {
+export function NavBar({ onToggleSidebar, accessData }: NavBarProps) {
   const pathname = usePathname();
 
   const isChat = pathname.startsWith("/chat");
@@ -63,14 +71,15 @@ export function NavBar({ onToggleSidebar }: NavBarProps) {
         </Link>
       </div>
 
-      {/* Right: Pricing + User */}
+      {/* Right: Timer + User */}
       <div className="flex items-center gap-3">
-        <Link
-          href="/pricing"
-          className="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors"
-        >
-          Pricing
-        </Link>
+        <AccessTimer
+          initialContinuousRemaining={accessData.continuousRemaining}
+          initialPausableRemaining={accessData.pausableRemaining}
+          initialPausableStatus={accessData.pausableStatus}
+          initialTrialActive={accessData.trialActive}
+          initialTrialRemaining={accessData.trialRemaining}
+        />
         <UserButton
           appearance={{
             elements: {
