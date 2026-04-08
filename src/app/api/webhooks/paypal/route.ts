@@ -1,16 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyWebhookSignature, getSubscriptionDetails } from "@/lib/paypal/client";
-import { upsertSubscription, updateUserPlan, getSubscription } from "@/lib/db/queries";
-import { db } from "@/lib/db";
-import { users } from "@/lib/db/schema";
-import { eq } from "drizzle-orm";
-import { isValidUUID } from "@/lib/utils";
+import { verifyWebhookSignature } from "@/lib/paypal/client";
+import {
+  getPurchaseByOrderId,
+  updatePurchaseStatus,
+  getUserAccess,
+  upsertUserAccess,
+  updateUserPlan,
+} from "@/lib/db/queries";
+import { getProduct } from "@/lib/access/products";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.text();
 
-    // Collect PayPal signature headers
     const headers: Record<string, string> = {};
     const paypalHeaders = [
       "paypal-auth-algo",
@@ -24,7 +26,6 @@ export async function POST(req: NextRequest) {
       if (value) headers[key] = value;
     }
 
-    // Verify the webhook signature
     const isValid = await verifyWebhookSignature(headers, body);
     if (!isValid) {
       console.error("PayPal webhook signature verification failed");
@@ -41,19 +42,14 @@ export async function POST(req: NextRequest) {
     console.log(`PayPal webhook received: ${eventType}`);
 
     switch (eventType) {
-      case "BILLING.SUBSCRIPTION.ACTIVATED": {
-        await handleSubscriptionActivated(resource);
+      case "PAYMENT.CAPTURE.COMPLETED": {
+        await handleCaptureCompleted(resource);
         break;
       }
 
-      case "BILLING.SUBSCRIPTION.CANCELLED":
-      case "BILLING.SUBSCRIPTION.SUSPENDED": {
-        await handleSubscriptionDeactivated(resource, eventType);
-        break;
-      }
-
-      case "PAYMENT.SALE.COMPLETED": {
-        await handlePaymentCompleted(resource);
+      case "PAYMENT.CAPTURE.DENIED":
+      case "PAYMENT.CAPTURE.REFUNDED": {
+        await handleCaptureFailed(resource, eventType);
         break;
       }
 
@@ -72,183 +68,132 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// ─── Event Handlers ──────────────────────────────────────────────────────────
+async function handleCaptureCompleted(resource: Record<string, unknown>) {
+  const captureId = resource.id as string | undefined;
 
-async function handleSubscriptionActivated(resource: PayPalWebhookResource) {
-  const paypalSubscriptionId = resource.id;
-  const userId = resource.custom_id;
+  const supplementaryData = resource.supplementary_data as
+    | Record<string, unknown>
+    | undefined;
+  const relatedIds = supplementaryData?.related_ids as
+    | Record<string, string>
+    | undefined;
+  const orderId = relatedIds?.order_id;
 
-  if (!userId || !paypalSubscriptionId) {
-    console.error("Missing custom_id or subscription id in ACTIVATED event");
+  if (!orderId) {
+    console.log("PAYMENT.CAPTURE.COMPLETED: no order_id found, skipping");
     return;
   }
 
-  if (!isValidUUID(userId)) {
-    console.error("Invalid custom_id format:", userId);
-    return;
-  }
-  const [userExists] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
-  if (!userExists) {
-    console.error("custom_id does not match any user:", userId);
+  const purchase = await getPurchaseByOrderId(orderId);
+  if (!purchase) {
+    console.log(`No purchase record for order ${orderId}`);
     return;
   }
 
-  // Fetch full subscription details for billing period info
-  let periodStart: Date | undefined;
-  let periodEnd: Date | undefined;
+  if (purchase.status === "completed") {
+    console.log(`Purchase for order ${orderId} already completed`);
+    return;
+  }
 
-  try {
-    const details = await getSubscriptionDetails(paypalSubscriptionId);
-    if (details.start_time) {
-      periodStart = new Date(details.start_time);
+  await updatePurchaseStatus(orderId, "completed", captureId);
+
+  const product = getProduct(purchase.passType);
+  if (!product) {
+    console.error("Unknown pass type:", purchase.passType);
+    return;
+  }
+
+  const now = new Date();
+  const currentAccess = await getUserAccess(purchase.userId);
+
+  if (product.isPausable) {
+    const currentSeconds = currentAccess?.pausableRemainingSeconds ?? 0;
+    const currentStatus = currentAccess?.pausableStatus ?? "none";
+
+    let snapshotSeconds = currentSeconds;
+    if (
+      currentStatus === "active" &&
+      currentAccess?.pausableLastResumedAt
+    ) {
+      const elapsed =
+        (now.getTime() -
+          new Date(currentAccess.pausableLastResumedAt).getTime()) /
+        1000;
+      snapshotSeconds = Math.max(0, Math.floor(currentSeconds - elapsed));
     }
-    if (details.billing_info?.next_billing_time) {
-      periodEnd = new Date(details.billing_info.next_billing_time);
-    }
-  } catch (err) {
-    console.error("Failed to fetch subscription details:", err);
+
+    await upsertUserAccess(purchase.userId, {
+      pausableRemainingSeconds: snapshotSeconds + product.durationSeconds,
+      pausableStatus: "active",
+      pausableLastResumedAt: now,
+    });
+  } else {
+    const currentExpiry = currentAccess?.continuousExpiresAt
+      ? new Date(currentAccess.continuousExpiresAt)
+      : null;
+    const baseTime =
+      currentExpiry && currentExpiry > now ? currentExpiry : now;
+    const newExpiry = new Date(
+      baseTime.getTime() + product.durationSeconds * 1000
+    );
+
+    await upsertUserAccess(purchase.userId, {
+      continuousExpiresAt: newExpiry,
+    });
   }
 
-  await upsertSubscription({
-    userId,
-    paypalSubscriptionId,
-    plan: "pro",
-    status: "active",
-    currentPeriodStart: periodStart,
-    currentPeriodEnd: periodEnd,
-  });
-
-  await updateUserPlan(userId, "pro");
-
-  console.log(`Subscription activated for user ${userId}`);
+  await updateUserPlan(purchase.userId, "active");
+  console.log(`Webhook: capture completed for order ${orderId}`);
 }
 
-async function handleSubscriptionDeactivated(
-  resource: PayPalWebhookResource,
+async function handleCaptureFailed(
+  resource: Record<string, unknown>,
   eventType: string
 ) {
-  const paypalSubscriptionId = resource.id;
-  const userId = resource.custom_id;
+  const supplementaryData = resource.supplementary_data as
+    | Record<string, unknown>
+    | undefined;
+  const relatedIds = supplementaryData?.related_ids as
+    | Record<string, string>
+    | undefined;
+  const orderId = relatedIds?.order_id;
 
-  if (!userId || !paypalSubscriptionId) {
-    console.error(`Missing custom_id or subscription id in ${eventType} event`);
+  if (!orderId) {
+    console.log(`${eventType}: no order_id found, skipping`);
     return;
   }
 
-  if (!isValidUUID(userId)) {
-    console.error("Invalid custom_id format:", userId);
-    return;
-  }
-  const [userExists] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
-  if (!userExists) {
-    console.error("custom_id does not match any user:", userId);
-    return;
-  }
+  const purchase = await getPurchaseByOrderId(orderId);
+  const status = eventType === "PAYMENT.CAPTURE.REFUNDED" ? "refunded" : "failed";
+  await updatePurchaseStatus(orderId, status);
 
-  const status =
-    eventType === "BILLING.SUBSCRIPTION.CANCELLED" ? "cancelled" : "suspended";
-
-  await upsertSubscription({
-    userId,
-    paypalSubscriptionId,
-    plan: "pro",
-    status,
-  });
-
-  // Only downgrade plan if cancelled and the current period has already ended.
-  // If the period is still active, the access check in chat/route.ts handles
-  // expiration via currentPeriodEnd, so we keep the user on "pro" until then.
-  if (status === "cancelled") {
-    const existingSub = await getSubscription(userId);
-    const periodEnd = existingSub?.currentPeriodEnd ? new Date(existingSub.currentPeriodEnd) : null;
-    if (!periodEnd || periodEnd <= new Date()) {
-      await updateUserPlan(userId, "trial");
-    }
-    // else: user stays on "pro" until currentPeriodEnd passes
-  }
-
-  console.log(`Subscription ${status} for user ${userId}`);
-}
-
-async function handlePaymentCompleted(resource: PayPalWebhookResource) {
-  // Payment sale events have billing_agreement_id pointing to the subscription
-  const billingAgreementId = resource.billing_agreement_id;
-
-  if (!billingAgreementId) {
-    // Not a subscription payment, ignore
-    return;
-  }
-
-  // Look up which user has this PayPal subscription
-  let userId: string | undefined;
-
-  try {
-    const details = await getSubscriptionDetails(billingAgreementId);
-    userId = details.custom_id;
-  } catch {
-    // Fallback: look up by paypal subscription id in our DB
-    console.error("Failed to fetch subscription details for payment event");
-  }
-
-  if (!userId) {
-    // Try to find from our database
-    const existingSub = await findSubscriptionByPaypalId(billingAgreementId);
-    if (existingSub) {
-      userId = existingSub.userId;
+  // Revoke granted time if the purchase was previously completed
+  if (purchase && purchase.status === "completed") {
+    const product = getProduct(purchase.passType);
+    if (product) {
+      const currentAccess = await getUserAccess(purchase.userId);
+      if (currentAccess) {
+        if (product.isPausable) {
+          const newSeconds = Math.max(
+            0,
+            currentAccess.pausableRemainingSeconds - product.durationSeconds
+          );
+          await upsertUserAccess(purchase.userId, {
+            pausableRemainingSeconds: newSeconds,
+            pausableStatus: newSeconds <= 0 ? "none" : currentAccess.pausableStatus as string,
+          });
+        } else if (currentAccess.continuousExpiresAt) {
+          const newExpiry = new Date(
+            new Date(currentAccess.continuousExpiresAt).getTime() -
+              product.durationSeconds * 1000
+          );
+          await upsertUserAccess(purchase.userId, {
+            continuousExpiresAt: newExpiry > new Date() ? newExpiry : null,
+          });
+        }
+      }
     }
   }
 
-  if (!userId) {
-    console.error(
-      `Could not resolve user for payment on subscription ${billingAgreementId}`
-    );
-    return;
-  }
-
-  // Extend the billing period
-  const existingSub = await getSubscription(userId);
-  const baseDate = existingSub?.currentPeriodEnd && new Date(existingSub.currentPeriodEnd) > new Date()
-    ? new Date(existingSub.currentPeriodEnd)
-    : new Date();
-  const nextPeriodEnd = new Date(baseDate);
-  const targetMonth = nextPeriodEnd.getMonth() + 1;
-  nextPeriodEnd.setMonth(targetMonth);
-  if (nextPeriodEnd.getMonth() !== targetMonth % 12) {
-    nextPeriodEnd.setDate(0); // last day of previous month
-  }
-  const periodStart = new Date(baseDate);
-
-  await upsertSubscription({
-    userId,
-    paypalSubscriptionId: billingAgreementId,
-    plan: "pro",
-    status: "active",
-    currentPeriodStart: periodStart,
-    currentPeriodEnd: nextPeriodEnd,
-  });
-
-  await updateUserPlan(userId, "pro");
-
-  console.log(`Payment completed for user ${userId}, period extended`);
-}
-
-// ─── Helpers ─────────────────────────────────────────────────────────────────
-
-async function findSubscriptionByPaypalId(paypalSubscriptionId: string) {
-  const { subscriptions } = await import("@/lib/db/schema");
-  const [sub] = await db
-    .select()
-    .from(subscriptions)
-    .where(eq(subscriptions.paypalSubscriptionId, paypalSubscriptionId));
-  return sub ?? null;
-}
-
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-interface PayPalWebhookResource {
-  id?: string;
-  custom_id?: string;
-  billing_agreement_id?: string;
-  status?: string;
-  [key: string]: unknown;
+  console.log(`Webhook: ${status} for order ${orderId}`);
 }
