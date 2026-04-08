@@ -1,19 +1,25 @@
 import { auth } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { getUserByClerkId, getSubscription } from "@/lib/db/queries";
+import {
+  getUserByClerkId,
+  getUserAccess,
+  getUserPurchases,
+} from "@/lib/db/queries";
+import { computeAccessState } from "@/lib/access/check";
+import { getProduct } from "@/lib/access/products";
+import { BillingPauseResumeButton } from "@/components/billing/billing-pause-resume";
 import {
   CreditCard,
-  Crown,
-  Calendar,
-  Hash,
   ArrowLeft,
-  ExternalLink,
+  Clock,
+  Zap,
+  ShoppingBag,
 } from "lucide-react";
 
 export const metadata = {
-  title: "Billing - Bricks",
-  description: "Manage your Bricks subscription billing",
+  title: "Billing - The Fixer",
+  description: "View your purchase history and access status",
 };
 
 export default async function BillingPage() {
@@ -21,15 +27,20 @@ export default async function BillingPage() {
   if (!clerkId) redirect("/sign-in");
 
   const dbUser = await getUserByClerkId(clerkId);
-  const subscription = dbUser ? await getSubscription(dbUser.id) : null;
+  const access = dbUser ? await getUserAccess(dbUser.id) : null;
+  const state = computeAccessState(
+    access ?? null,
+    dbUser?.trialExpiresAt ?? null
+  );
+  const purchases = dbUser ? await getUserPurchases(dbUser.id) : [];
 
-  const plan = dbUser?.plan ?? "trial";
-  const isPro = plan === "pro";
+  const hours = Math.floor(state.totalRemaining / 3600);
+  const minutes = Math.floor((state.totalRemaining % 3600) / 60);
+  const timeLabel = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 
   return (
     <div className="flex flex-1 justify-center overflow-y-auto p-6">
       <div className="w-full max-w-2xl space-y-6">
-        {/* Back Link + Header */}
         <div>
           <Link
             href="/settings"
@@ -42,191 +53,132 @@ export default async function BillingPage() {
             Billing
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            View and manage your subscription details
+            Your access status and purchase history
           </p>
         </div>
 
-        {/* Current Plan Card */}
+        {/* Current Access Card */}
         <div className="rounded-xl border border-border bg-card p-6 ring-1 ring-foreground/5">
           <div className="mb-4 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <CreditCard className="h-5 w-5 text-muted-foreground" />
               <h2 className="text-base font-semibold text-foreground">
-                Current Plan
+                Current Access
               </h2>
             </div>
-            {isPro ? (
+            {state.hasAccess ? (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1 text-xs font-semibold text-primary">
-                <Crown className="h-3 w-3" />
-                Pro - $20/mo
+                <Zap className="h-3 w-3" />
+                Active
               </span>
             ) : (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-3 py-1 text-xs font-semibold text-muted-foreground">
-                Free Trial
+                <Clock className="h-3 w-3" />
+                Expired
               </span>
             )}
           </div>
 
-          {subscription ? (
-            <div className="space-y-3">
-              {/* Status */}
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">Status</span>
-                <span
-                  className={`inline-flex items-center gap-1.5 font-medium capitalize ${
-                    subscription.status === "active"
-                      ? "text-green-600 dark:text-green-400"
-                      : subscription.status === "cancelled"
-                        ? "text-red-500 dark:text-red-400"
-                        : "text-yellow-600 dark:text-yellow-400"
-                  }`}
-                >
-                  <span
-                    className={`h-1.5 w-1.5 rounded-full ${
-                      subscription.status === "active"
-                        ? "bg-green-500"
-                        : subscription.status === "cancelled"
-                          ? "bg-red-500"
-                          : "bg-yellow-500"
-                    }`}
-                  />
-                  {subscription.status}
-                </span>
-              </div>
-
-              {/* Plan */}
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">Plan</span>
-                <span className="font-medium text-foreground capitalize">
-                  {subscription.plan}
-                </span>
-              </div>
-
-              {/* PayPal Subscription ID */}
-              {subscription.paypalSubscriptionId && (
-                <div className="flex items-center justify-between text-sm">
-                  <span className="flex items-center gap-1.5 text-muted-foreground">
-                    <Hash className="h-3.5 w-3.5" />
-                    Subscription ID
-                  </span>
-                  <span className="font-mono text-xs text-foreground">
-                    {subscription.paypalSubscriptionId}
-                  </span>
-                </div>
-              )}
-
-              {/* Current Period */}
-              {subscription.currentPeriodStart && (
-                <div className="flex items-center justify-between text-sm">
-                  <span className="flex items-center gap-1.5 text-muted-foreground">
-                    <Calendar className="h-3.5 w-3.5" />
-                    Current period
-                  </span>
-                  <span className="font-medium text-foreground">
-                    {new Date(
-                      subscription.currentPeriodStart
-                    ).toLocaleDateString("en-US", {
-                      month: "short",
-                      day: "numeric",
-                    })}
-                    {subscription.currentPeriodEnd && (
-                      <>
-                        {" - "}
-                        {new Date(
-                          subscription.currentPeriodEnd
-                        ).toLocaleDateString("en-US", {
-                          month: "short",
-                          day: "numeric",
-                          year: "numeric",
-                        })}
-                      </>
-                    )}
-                  </span>
-                </div>
-              )}
-
-              {/* Renewal Date */}
-              {subscription.currentPeriodEnd &&
-                subscription.status === "active" && (
-                  <div className="flex items-center justify-between text-sm">
-                    <span className="text-muted-foreground">Next renewal</span>
-                    <span className="font-medium text-foreground">
-                      {new Date(
-                        subscription.currentPeriodEnd
-                      ).toLocaleDateString("en-US", {
-                        month: "long",
-                        day: "numeric",
-                        year: "numeric",
-                      })}
-                    </span>
-                  </div>
-                )}
-
-              {/* PayPal Management Link */}
-              <div className="mt-4 border-t border-border pt-4">
-                <a
-                  href="https://www.paypal.com/myaccount/autopay/"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="inline-flex items-center gap-1.5 text-sm font-medium text-primary transition-colors hover:text-primary/80"
-                >
-                  Manage on PayPal
-                  <ExternalLink className="h-3.5 w-3.5" />
-                </a>
-              </div>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">Total time remaining</span>
+              <span className="font-medium text-foreground">
+                {state.totalRemaining > 0 ? timeLabel : "None"}
+              </span>
             </div>
-          ) : (
-            <div className="space-y-4">
-              <p className="text-sm text-muted-foreground">
-                You don&apos;t have an active subscription. Upgrade to Pro to
-                unlock unlimited access.
-              </p>
+            {state.continuousRemaining > 0 && (
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-muted-foreground">Continuous time</span>
+                <span className="font-medium text-foreground">
+                  {Math.floor(state.continuousRemaining / 3600)}h{" "}
+                  {Math.floor((state.continuousRemaining % 3600) / 60)}m
+                </span>
+              </div>
+            )}
+            {state.pausableRemaining > 0 && (
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-muted-foreground">
+                  Pausable time ({state.pausableStatus})
+                </span>
+                <span className="font-medium text-foreground">
+                  {Math.floor(state.pausableRemaining / 3600)}h{" "}
+                  {Math.floor((state.pausableRemaining % 3600) / 60)}m
+                </span>
+              </div>
+            )}
+            {state.pausableRemaining > 0 && (
+              <BillingPauseResumeButton pausableStatus={state.pausableStatus} />
+            )}
+          </div>
+
+          {!state.hasAccess && (
+            <div className="mt-4 border-t border-border pt-4">
               <Link
                 href="/pricing"
                 className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
               >
-                <Crown className="h-4 w-4" />
-                Upgrade to Pro
+                <Zap className="h-4 w-4" />
+                Get Access
               </Link>
             </div>
           )}
         </div>
 
-        {/* FAQ / Info */}
+        {/* Purchase History */}
         <div className="rounded-xl border border-border bg-card p-6 ring-1 ring-foreground/5">
-          <h2 className="mb-3 text-base font-semibold text-foreground">
-            Billing FAQ
-          </h2>
-          <div className="space-y-3 text-sm text-muted-foreground">
-            <div>
-              <p className="font-medium text-foreground">
-                How do I cancel my subscription?
-              </p>
-              <p className="mt-1">
-                You can cancel anytime through your PayPal account under
-                automatic payments. Your access continues until the end of the
-                billing period.
-              </p>
-            </div>
-            <div>
-              <p className="font-medium text-foreground">
-                What happens when my trial expires?
-              </p>
-              <p className="mt-1">
-                You&apos;ll need to upgrade to Pro to continue using Bricks.
-                Your conversations and projects are preserved.
-              </p>
-            </div>
-            <div>
-              <p className="font-medium text-foreground">
-                Can I get a refund?
-              </p>
-              <p className="mt-1">
-                Contact us within 7 days of a charge and we&apos;ll process a
-                full refund. No questions asked.
-              </p>
-            </div>
+          <div className="mb-4 flex items-center gap-2">
+            <ShoppingBag className="h-5 w-5 text-muted-foreground" />
+            <h2 className="text-base font-semibold text-foreground">
+              Purchase History
+            </h2>
           </div>
+
+          {purchases.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No purchases yet.</p>
+          ) : (
+            <div className="space-y-3">
+              {purchases.map((p) => {
+                const product = getProduct(p.passType);
+                return (
+                  <div
+                    key={p.id}
+                    className="flex items-center justify-between border-b border-border pb-3 last:border-0 last:pb-0"
+                  >
+                    <div>
+                      <p className="text-sm font-medium text-foreground">
+                        {product?.name ?? p.passType} Pass
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {new Date(p.createdAt).toLocaleDateString("en-US", {
+                          month: "short",
+                          day: "numeric",
+                          year: "numeric",
+                          hour: "numeric",
+                          minute: "2-digit",
+                        })}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-sm font-medium text-foreground">
+                        ${p.amountUsd}
+                      </p>
+                      <p
+                        className={`text-xs capitalize ${
+                          p.status === "completed"
+                            ? "text-green-600 dark:text-green-400"
+                            : p.status === "failed"
+                              ? "text-red-500"
+                              : "text-yellow-600"
+                        }`}
+                      >
+                        {p.status}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       </div>
     </div>

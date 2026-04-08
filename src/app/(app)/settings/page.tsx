@@ -1,7 +1,8 @@
 import { auth, currentUser } from "@clerk/nextjs/server";
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { getUserByClerkId, getSubscription } from "@/lib/db/queries";
+import { getUserByClerkId, getUserAccess } from "@/lib/db/queries";
+import { computeAccessState } from "@/lib/access/check";
 import {
   User,
   CreditCard,
@@ -9,6 +10,7 @@ import {
   Clock,
   ChevronRight,
   Mail,
+  Zap,
 } from "lucide-react";
 
 export const metadata = {
@@ -22,26 +24,33 @@ export default async function SettingsPage() {
 
   const clerkUser = await currentUser();
   const dbUser = await getUserByClerkId(clerkId);
-  const subscription = dbUser ? await getSubscription(dbUser.id) : null;
+  const access = dbUser ? await getUserAccess(dbUser.id) : null;
+  const state = computeAccessState(
+    access ?? null,
+    dbUser?.trialExpiresAt ?? null
+  );
 
   const plan = dbUser?.plan ?? "trial";
-  const isPro = plan === "pro";
+  const hasAccess = state.hasAccess;
   const email = clerkUser?.emailAddresses?.[0]?.emailAddress ?? "Not available";
   const fullName =
     [clerkUser?.firstName, clerkUser?.lastName].filter(Boolean).join(" ") ||
     "Not set";
   const avatarUrl = clerkUser?.imageUrl;
 
+  const hours = Math.floor(state.totalRemaining / 3600);
+  const minutes = Math.floor((state.totalRemaining % 3600) / 60);
+  const timeLabel = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+
   return (
     <div className="flex flex-1 justify-center overflow-y-auto p-6">
       <div className="w-full max-w-2xl space-y-6">
-        {/* Page Header */}
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-foreground">
             Settings
           </h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Manage your account and subscription
+            Manage your account and access
           </p>
         </div>
 
@@ -51,7 +60,6 @@ export default async function SettingsPage() {
             <User className="h-5 w-5 text-muted-foreground" />
             <h2 className="text-base font-semibold text-foreground">Profile</h2>
           </div>
-
           <div className="flex items-center gap-4">
             {avatarUrl ? (
               <img
@@ -74,81 +82,68 @@ export default async function SettingsPage() {
           </div>
         </div>
 
-        {/* Subscription Section */}
+        {/* Access Section */}
         <div className="rounded-xl border border-border bg-card p-6 ring-1 ring-foreground/5">
           <div className="mb-4 flex items-center justify-between">
             <div className="flex items-center gap-2">
               <CreditCard className="h-5 w-5 text-muted-foreground" />
-              <h2 className="text-base font-semibold text-foreground">
-                Subscription
-              </h2>
+              <h2 className="text-base font-semibold text-foreground">Access</h2>
             </div>
-            {isPro ? (
+            {hasAccess ? (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-3 py-1 text-xs font-semibold text-primary">
-                <Crown className="h-3 w-3" />
-                Pro
+                <Zap className="h-3 w-3" />
+                Active
               </span>
             ) : (
               <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-3 py-1 text-xs font-semibold text-muted-foreground">
                 <Clock className="h-3 w-3" />
-                Trial
+                {plan === "trial" ? "Trial" : "Expired"}
               </span>
             )}
           </div>
-
           <div className="space-y-3">
             <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">Current plan</span>
-              <span className="font-medium text-foreground capitalize">
-                {plan}
+              <span className="text-muted-foreground">Time remaining</span>
+              <span className="font-medium text-foreground">
+                {state.totalRemaining > 0 ? timeLabel : "None"}
               </span>
             </div>
-
-            {subscription && (
+            {state.pausableStatus !== "none" && (
               <div className="flex items-center justify-between text-sm">
-                <span className="text-muted-foreground">Status</span>
-                <span
-                  className={`font-medium capitalize ${
-                    subscription.status === "active"
-                      ? "text-green-600 dark:text-green-400"
-                      : "text-yellow-600 dark:text-yellow-400"
-                  }`}
-                >
-                  {subscription.status}
+                <span className="text-muted-foreground">Pausable time</span>
+                <span className="font-medium text-foreground capitalize">
+                  {state.pausableStatus} — {Math.floor(state.pausableRemaining / 3600)}h {Math.floor((state.pausableRemaining % 3600) / 60)}m
                 </span>
               </div>
             )}
-
-            {!isPro && dbUser?.trialExpiresAt && (
+            {plan === "trial" && dbUser?.trialExpiresAt && (
               <div className="flex items-center justify-between text-sm">
                 <span className="text-muted-foreground">Trial expires</span>
                 <span className="font-medium text-foreground">
-                  {new Date(dbUser.trialExpiresAt).toLocaleDateString(
-                    "en-US",
-                    { month: "short", day: "numeric", year: "numeric" }
-                  )}
+                  {new Date(dbUser.trialExpiresAt).toLocaleDateString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                  })}
                 </span>
               </div>
             )}
           </div>
-
-          {/* Billing Link */}
           <div className="mt-4 border-t border-border pt-4">
             <Link
               href="/settings/billing"
               className="flex items-center justify-between rounded-lg p-2 text-sm font-medium text-foreground transition-colors hover:bg-muted"
             >
-              <span>Manage billing</span>
+              <span>Purchase history</span>
               <ChevronRight className="h-4 w-4 text-muted-foreground" />
             </Link>
-
-            {!isPro && (
+            {!hasAccess && (
               <Link
                 href="/pricing"
                 className="mt-2 flex w-full items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
               >
                 <Crown className="h-4 w-4" />
-                Upgrade to Pro
+                Get Access
               </Link>
             )}
           </div>
