@@ -13,13 +13,15 @@ import { buildContentBlocks, summarizeAttachments } from "@/lib/ai/attachments";
 import type { Attachment } from "@/lib/types/attachment";
 import {
   getUserByClerkId,
-  getSubscription,
+  getUserAccess,
+  updateUserPlan,
   createConversation,
   getConversation,
   getMessages,
   createMessage,
   updateConversationTitle,
 } from "@/lib/db/queries";
+import { computeAccessState } from "@/lib/access/check";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -27,15 +29,24 @@ function sseEvent(data: Record<string, unknown>): string {
   return `data: ${JSON.stringify(data)}\n\n`;
 }
 
-function hasAccess(user: {
+async function hasAccessCheck(user: {
+  id: string;
   plan: string;
   trialExpiresAt: Date | null;
-}): boolean {
-  if (user.plan === "pro") return true;
-  if (user.plan === "trial" && user.trialExpiresAt) {
-    return new Date(user.trialExpiresAt) > new Date();
+}): Promise<boolean> {
+  // Trial check
+  if (
+    user.plan === "trial" &&
+    user.trialExpiresAt &&
+    new Date(user.trialExpiresAt) > new Date()
+  ) {
+    return true;
   }
-  return false;
+
+  // Purchased access check
+  const access = await getUserAccess(user.id);
+  const state = computeAccessState(access ?? null, user.trialExpiresAt);
+  return state.hasAccess;
 }
 
 // ─── POST /api/chat ──────────────────────────────────────────────────────────
@@ -60,21 +71,17 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 3. Access check (trial / subscription)
-    if (!hasAccess(dbUser)) {
-      const subscription = await getSubscription(dbUser.id);
-      if (!subscription || subscription.status !== "active") {
-        return new Response(
-          JSON.stringify({ error: "Trial expired. Please upgrade." }),
-          { status: 402, headers: { "Content-Type": "application/json" } }
-        );
+    // 3. Access check (trial / purchased time)
+    const canAccess = await hasAccessCheck(dbUser);
+    if (!canAccess) {
+      // Transition plan to 'expired' if not already
+      if (dbUser.plan !== "trial" && dbUser.plan !== "expired") {
+        await updateUserPlan(dbUser.id, "expired");
       }
-      if (subscription.currentPeriodEnd && new Date(subscription.currentPeriodEnd) < new Date()) {
-        return new Response(
-          JSON.stringify({ error: "Subscription expired. Please renew." }),
-          { status: 402, headers: { "Content-Type": "application/json" } }
-        );
-      }
+      return new Response(
+        JSON.stringify({ error: "Access expired. Please purchase a pass." }),
+        { status: 402, headers: { "Content-Type": "application/json" } }
+      );
     }
 
     // 4. Parse body
