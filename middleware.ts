@@ -24,6 +24,16 @@ export default clerkMiddleware(async (auth, request) => {
     await auth.protect();
   }
 
+  // CSRF: validate Origin header on state-mutating requests (skip webhooks — they use signature verification)
+  const method = request.method.toUpperCase();
+  if (["POST", "PATCH", "PUT", "DELETE"].includes(method)) {
+    const origin = request.headers.get("origin");
+    const url = new URL(request.url);
+    if (!url.pathname.startsWith("/api/webhooks") && origin && origin !== url.origin) {
+      return NextResponse.json({ error: "CSRF validation failed" }, { status: 403 });
+    }
+  }
+
   const response = NextResponse.next();
 
   // Inject no-cache headers for authenticated / dynamic routes so CloudFront

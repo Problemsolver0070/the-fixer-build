@@ -40,21 +40,39 @@ export async function uploadBlob(
   return blockBlob.url;
 }
 
-export async function downloadBlob(blobKey: string): Promise<Buffer> {
+export async function downloadBlob(blobKey: string, maxSizeBytes = 25 * 1024 * 1024): Promise<Buffer> {
   const client = getBlobServiceClient();
   const container = client.getContainerClient(getContainerName());
   const blockBlob = container.getBlockBlobClient(blobKey);
 
+  const properties = await blockBlob.getProperties();
+  if (properties.contentLength && properties.contentLength > maxSizeBytes) {
+    throw new Error(`Blob size ${properties.contentLength} exceeds limit of ${maxSizeBytes}`);
+  }
+
   const response = await blockBlob.download(0);
   const chunks: Buffer[] = [];
+  let totalSize = 0;
 
   if (response.readableStreamBody) {
     for await (const chunk of response.readableStreamBody) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalSize += buf.length;
+      if (totalSize > maxSizeBytes) {
+        throw new Error(`Download exceeded size limit of ${maxSizeBytes} bytes`);
+      }
+      chunks.push(buf);
     }
   }
 
   return Buffer.concat(chunks);
+}
+
+export async function deleteBlob(blobKey: string): Promise<void> {
+  const client = getBlobServiceClient();
+  const container = client.getContainerClient(getContainerName());
+  const blockBlob = container.getBlockBlobClient(blobKey);
+  await blockBlob.deleteIfExists();
 }
 
 export function generateSasUrl(blobKey: string): string {

@@ -1,15 +1,24 @@
 // ─── PayPal REST API Client ──────────────────────────────────────────────────
 
-const PAYPAL_BASE_URL =
-  process.env.NODE_ENV === "production"
+function getPayPalBaseUrl(): string {
+  if (process.env.PAYPAL_BASE_URL) return process.env.PAYPAL_BASE_URL;
+  return process.env.NODE_ENV === "production"
     ? "https://api-m.paypal.com"
     : "https://api-m.sandbox.paypal.com";
+}
 
 /**
  * Fetch a short-lived OAuth2 access token from PayPal.
  * Uses Basic auth with PAYPAL_CLIENT_ID:PAYPAL_CLIENT_SECRET.
+ * Tokens are cached in memory until 60s before expiry.
  */
+let _tokenCache: { token: string; expiresAt: number } | null = null;
+
 export async function getAccessToken(): Promise<string> {
+  if (_tokenCache && _tokenCache.expiresAt > Date.now() + 60_000) {
+    return _tokenCache.token;
+  }
+
   const clientId = process.env.NEXT_PUBLIC_PAYPAL_CLIENT_ID;
   const clientSecret = process.env.PAYPAL_CLIENT_SECRET;
 
@@ -19,7 +28,7 @@ export async function getAccessToken(): Promise<string> {
 
   const auth = Buffer.from(`${clientId}:${clientSecret}`).toString("base64");
 
-  const res = await fetch(`${PAYPAL_BASE_URL}/v1/oauth2/token`, {
+  const res = await fetch(`${getPayPalBaseUrl()}/v1/oauth2/token`, {
     method: "POST",
     headers: {
       Authorization: `Basic ${auth}`,
@@ -34,7 +43,10 @@ export async function getAccessToken(): Promise<string> {
   }
 
   const data = await res.json();
-  return data.access_token as string;
+  const token = data.access_token as string;
+  const expiresIn = (data.expires_in as number) || 3600;
+  _tokenCache = { token, expiresAt: Date.now() + expiresIn * 1000 };
+  return token;
 }
 
 /**
@@ -50,6 +62,14 @@ export async function verifyWebhookSignature(
     throw new Error("PAYPAL_WEBHOOK_ID is not configured");
   }
 
+  const requiredHeaders = ["paypal-auth-algo", "paypal-cert-url", "paypal-transmission-id", "paypal-transmission-sig", "paypal-transmission-time"];
+  for (const h of requiredHeaders) {
+    if (!headers[h]) {
+      console.error(`Missing required PayPal header: ${h}`);
+      return false;
+    }
+  }
+
   const accessToken = await getAccessToken();
 
   const verificationPayload = {
@@ -63,7 +83,7 @@ export async function verifyWebhookSignature(
   };
 
   const res = await fetch(
-    `${PAYPAL_BASE_URL}/v1/notifications/verify-webhook-signature`,
+    `${getPayPalBaseUrl()}/v1/notifications/verify-webhook-signature`,
     {
       method: "POST",
       headers: {
@@ -93,7 +113,7 @@ export async function getSubscriptionDetails(
   const accessToken = await getAccessToken();
 
   const res = await fetch(
-    `${PAYPAL_BASE_URL}/v1/billing/subscriptions/${subscriptionId}`,
+    `${getPayPalBaseUrl()}/v1/billing/subscriptions/${subscriptionId}`,
     {
       method: "GET",
       headers: {

@@ -14,7 +14,7 @@ import { AttachmentButton, uploadFile } from "@/components/chat/attachment-butto
 import { AttachmentPreview } from "@/components/chat/attachment-preview";
 import { MessageAttachments } from "@/components/chat/message-attachments";
 import type { PendingAttachment, Attachment } from "@/lib/types/attachment";
-import { detectCategory } from "@/lib/types/attachment";
+import { detectCategory, isAllowedFile, MAX_FILE_SIZE } from "@/lib/types/attachment";
 
 const CHAT_API_URL =
   process.env.NEXT_PUBLIC_CHAT_API_URL || "/api/chat";
@@ -98,13 +98,12 @@ export function BuildLayout({
 
   const handleFilesGenerated = useCallback(
     async (newFiles: Record<string, string>) => {
-      setFiles(newFiles);
+      const existingFiles = useBuildStore.getState().files;
+      const mergedFiles = { ...existingFiles, ...newFiles };
+      setFiles(mergedFiles);
 
       // Save to API in the background
       try {
-        const existingFiles = useBuildStore.getState().files;
-        const mergedFiles = { ...existingFiles, ...newFiles };
-
         await fetch("/api/projects", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -137,6 +136,7 @@ export function BuildLayout({
 
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
+    pendingAttachments.forEach((p) => { if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
     setPendingAttachments([]);
     setIsStreaming(true);
 
@@ -234,7 +234,7 @@ export function BuildLayout({
       setIsStreaming(false);
       messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [input, isStreaming, messages, handleFilesGenerated, getToken, pendingAttachments, handleFilesSelected]);
+  }, [input, isStreaming, handleFilesGenerated, getToken, pendingAttachments]);
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -287,7 +287,7 @@ export function BuildLayout({
               </div>
             );
           })}
-          {isStreaming && messages[messages.length - 1]?.role === "user" && (
+          {isStreaming && (messages.length === 0 || messages[messages.length - 1]?.role === "user" || messages[messages.length - 1]?.content === "") && (
             <div className="flex flex-col gap-1 items-start">
               <div className="max-w-[85%] rounded-lg px-3 py-2 text-sm bg-muted text-muted-foreground">
                 <span className="inline-flex items-center gap-1">
@@ -310,7 +310,10 @@ export function BuildLayout({
             e.preventDefault();
             e.stopPropagation();
             if (e.dataTransfer.files.length > 0) {
-              const files = Array.from(e.dataTransfer.files);
+              const files = Array.from(e.dataTransfer.files).filter(
+                (file) => isAllowedFile(file.type, file.name) && file.size <= MAX_FILE_SIZE
+              );
+              if (files.length === 0) return;
               const pending: PendingAttachment[] = files.map((file) => ({
                 id: crypto.randomUUID(),
                 file,
@@ -447,10 +450,26 @@ function extractFilesFromResponse(
       const incompleteMatch = content.match(/<bricks-files>\s*([\s\S]*)/);
       if (incompleteMatch) {
         bricksJson = incompleteMatch[1];
-        // Try to repair truncated JSON: find the last complete object in the array
-        const lastCompleteObj = bricksJson.lastIndexOf("}");
-        if (lastCompleteObj > 0) {
-          bricksJson = bricksJson.slice(0, lastCompleteObj + 1) + "]";
+        // Try to repair truncated JSON: use brace-depth tracking that handles braces inside strings
+        let depth = 0;
+        let lastCompleteEnd = -1;
+        for (let i = 0; i < bricksJson.length; i++) {
+          const ch = bricksJson[i];
+          if (ch === '"') {
+            i++;
+            while (i < bricksJson.length && bricksJson[i] !== '"') {
+              if (bricksJson[i] === '\\') i++;
+              i++;
+            }
+          } else if (ch === '{') {
+            depth++;
+          } else if (ch === '}') {
+            depth--;
+            if (depth === 0) lastCompleteEnd = i;
+          }
+        }
+        if (lastCompleteEnd > 0) {
+          bricksJson = bricksJson.slice(0, lastCompleteEnd + 1) + "]";
         }
       }
     }

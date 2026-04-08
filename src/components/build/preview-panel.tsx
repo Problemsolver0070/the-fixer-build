@@ -29,10 +29,15 @@ async function getContainer(): Promise<WebContainer> {
   if (bootPromise) return bootPromise;
 
   bootPromise = (async () => {
-    const { WebContainer } = await import("@webcontainer/api");
-    const instance = await WebContainer.boot();
-    containerInstance = instance;
-    return instance;
+    try {
+      const { WebContainer } = await import("@webcontainer/api");
+      const instance = await WebContainer.boot();
+      containerInstance = instance;
+      return instance;
+    } catch (err) {
+      bootPromise = null;
+      throw err;
+    }
   })();
 
   return bootPromise;
@@ -321,7 +326,7 @@ export function PreviewPanel() {
             srcDoc={staticHtml}
             title="Live Preview"
             className="flex-1 border-0 bg-white"
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+            sandbox="allow-scripts allow-forms allow-popups allow-modals"
           />
         </div>
       );
@@ -349,7 +354,7 @@ export function PreviewPanel() {
             src={previewUrl}
             title="Live Preview"
             className="flex-1 border-0 bg-white"
-            sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+            sandbox="allow-scripts allow-forms allow-popups allow-modals"
             allow="cross-origin-isolated"
           />
         )}
@@ -380,14 +385,14 @@ export function PreviewPanel() {
               srcDoc={staticHtml}
               title="Live Preview"
               className="flex-1 border-0 bg-white"
-              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+              sandbox="allow-scripts allow-forms allow-popups allow-modals"
             />
           ) : previewUrl ? (
             <iframe
               src={previewUrl}
               title="Live Preview"
               className="flex-1 border-0 bg-white"
-              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+              sandbox="allow-scripts allow-forms allow-popups allow-modals"
               allow="cross-origin-isolated"
             />
           ) : null}

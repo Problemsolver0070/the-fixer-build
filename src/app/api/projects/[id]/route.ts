@@ -6,6 +6,7 @@ import {
   updateProjectFiles,
   deleteProject,
 } from "@/lib/db/queries";
+import { isValidUUID } from "@/lib/utils";
 
 export async function GET(
   _req: NextRequest,
@@ -23,6 +24,13 @@ export async function GET(
     }
 
     const { id } = await params;
+    if (!isValidUUID(id)) {
+      return NextResponse.json(
+        { error: "Invalid project ID" },
+        { status: 400 }
+      );
+    }
+
     const project = await getProject(id, user.id);
     if (!project) {
       return NextResponse.json(
@@ -57,13 +65,27 @@ export async function PATCH(
     }
 
     const { id } = await params;
+    if (!isValidUUID(id)) {
+      return NextResponse.json(
+        { error: "Invalid project ID" },
+        { status: 400 }
+      );
+    }
+
     const body = await req.json();
     const { files } = body;
 
-    if (!files || typeof files !== "object") {
+    if (!files || typeof files !== "object" || Array.isArray(files)) {
       return NextResponse.json(
         { error: "Files object is required" },
         { status: 400 }
+      );
+    }
+
+    if (JSON.stringify(files).length > 10_000_000) {
+      return NextResponse.json(
+        { error: "Files payload too large" },
+        { status: 413 }
       );
     }
 
@@ -101,6 +123,13 @@ export async function DELETE(
     }
 
     const { id } = await params;
+    if (!isValidUUID(id)) {
+      return NextResponse.json(
+        { error: "Invalid project ID" },
+        { status: 400 }
+      );
+    }
+
     await deleteProject(id, user.id);
 
     return NextResponse.json({ deleted: true });

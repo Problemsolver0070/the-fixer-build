@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { FileText, FileCode, Download } from "lucide-react";
+import { FileText, FileCode, Download, ImageOff } from "lucide-react";
 import type { Attachment } from "@/lib/types/attachment";
+import { cn } from "@/lib/utils";
 
 interface MessageAttachmentsProps {
   attachments: Attachment[];
@@ -27,10 +28,20 @@ async function getSasUrl(blobKey: string): Promise<string> {
 function ImageAttachment({ att }: { att: Attachment }) {
   const [url, setUrl] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
-    getSasUrl(att.blobKey).then(setUrl).catch(() => {});
+    getSasUrl(att.blobKey).then(setUrl).catch(() => setError(true));
   }, [att.blobKey]);
+
+  if (error) {
+    return (
+      <div className="flex h-32 w-48 flex-col items-center justify-center gap-2 rounded-lg border border-destructive/30 bg-muted text-muted-foreground">
+        <ImageOff className="h-6 w-6" />
+        <span className="text-xs">Failed to load image</span>
+      </div>
+    );
+  }
 
   if (!url) return <div className="h-32 w-48 animate-pulse rounded-lg bg-muted" />;
 
@@ -60,12 +71,27 @@ function ImageAttachment({ att }: { att: Attachment }) {
 
 function FileAttachment({ att }: { att: Attachment }) {
   const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState(false);
 
   useEffect(() => {
-    getSasUrl(att.blobKey).then(setUrl).catch(() => {});
+    getSasUrl(att.blobKey).then(setUrl).catch(() => setError(true));
   }, [att.blobKey]);
 
   const Icon = att.category === "pdf" ? FileText : FileCode;
+
+  if (error) {
+    return (
+      <span
+        className={cn(
+          "inline-flex items-center gap-2 rounded-lg border border-destructive/30 bg-muted/30 px-3 py-2 text-sm opacity-50 cursor-not-allowed"
+        )}
+      >
+        <Icon className="h-4 w-4 text-muted-foreground" />
+        <span className="max-w-[200px] truncate">{att.filename}</span>
+        <span className="text-xs text-destructive">Error</span>
+      </span>
+    );
+  }
 
   return (
     <a

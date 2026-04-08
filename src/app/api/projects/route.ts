@@ -5,7 +5,9 @@ import {
   getProjects,
   getProjectByConversationId,
   createProject,
+  getConversation,
 } from "@/lib/db/queries";
+import { isValidUUID } from "@/lib/utils";
 
 export async function GET(req: NextRequest) {
   try {
@@ -60,6 +62,29 @@ export async function POST(req: NextRequest) {
         { error: "Project name is required" },
         { status: 400 }
       );
+    }
+
+    if (name.trim().length > 200) {
+      return NextResponse.json(
+        { error: "Project name too long" },
+        { status: 400 }
+      );
+    }
+
+    if (conversationId) {
+      if (!isValidUUID(conversationId)) {
+        return NextResponse.json(
+          { error: "Invalid conversation ID" },
+          { status: 400 }
+        );
+      }
+      const conversation = await getConversation(conversationId, user.id);
+      if (!conversation) {
+        return NextResponse.json(
+          { error: "Conversation not found" },
+          { status: 404 }
+        );
+      }
     }
 
     const project = await createProject(

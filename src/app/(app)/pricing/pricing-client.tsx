@@ -103,6 +103,10 @@ export function PricingClient({
                 <div className="rounded-lg bg-muted/50 p-4 text-center text-sm text-muted-foreground">
                   Setting up your account... Please refresh in a moment.
                 </div>
+              ) : !planId ? (
+                <div className="rounded-lg border border-destructive/20 bg-destructive/5 p-4 text-center text-sm text-destructive">
+                  PayPal plan is not configured. Please contact support.
+                </div>
               ) : (
                 <PayPalSubscribeButton
                   planId={planId}

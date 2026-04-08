@@ -69,6 +69,12 @@ export async function POST(req: NextRequest) {
           { status: 402, headers: { "Content-Type": "application/json" } }
         );
       }
+      if (subscription.currentPeriodEnd && new Date(subscription.currentPeriodEnd) < new Date()) {
+        return new Response(
+          JSON.stringify({ error: "Subscription expired. Please renew." }),
+          { status: 402, headers: { "Content-Type": "application/json" } }
+        );
+      }
     }
 
     // 4. Parse body
@@ -94,6 +100,37 @@ export async function POST(req: NextRequest) {
       });
     }
 
+    // Validate input sizes
+    if (trimmedMessage.length > 50_000) {
+      return new Response(
+        JSON.stringify({ error: "Message too long (max 50,000 characters)" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+    if (incomingAttachments && incomingAttachments.length > 10) {
+      return new Response(
+        JSON.stringify({ error: "Too many attachments (max 10)" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Validate attachment ownership
+    if (incomingAttachments?.length) {
+      const prefix = `uploads/${dbUser.id}/`;
+      for (const att of incomingAttachments) {
+        if (!att.blobKey || typeof att.blobKey !== "string" || !att.blobKey.startsWith(prefix) || att.blobKey.includes("..")) {
+          return new Response(
+            JSON.stringify({ error: "Invalid attachment" }),
+            { status: 403, headers: { "Content-Type": "application/json" } }
+          );
+        }
+      }
+    }
+
+    // Validate mode at runtime
+    const validModes = ["chat", "build"];
+    const safeMode = validModes.includes(mode) ? mode : "chat";
+
     // 5. Conversation — create if needed
     let conversationId = incomingConversationId;
     let isFirstMessage = false;
@@ -107,7 +144,7 @@ export async function POST(req: NextRequest) {
         );
       }
     } else {
-      const conversation = await createConversation(dbUser.id, mode);
+      const conversation = await createConversation(dbUser.id, safeMode);
       conversationId = conversation.id;
       isFirstMessage = true;
     }
@@ -117,12 +154,12 @@ export async function POST(req: NextRequest) {
       conversationId,
       "user",
       trimmedMessage,
-      incomingAttachments?.length ? incomingAttachments : null
+      incomingAttachments?.length ? incomingAttachments : null,
+      dbUser.id
     );
 
     // 7. Load last 50 messages as history
-    const allMessages = await getMessages(conversationId, dbUser.id);
-    const recentMessages = allMessages.slice(-50);
+    const recentMessages = await getMessages(conversationId, dbUser.id, 50);
     // History = all recent messages except the last one (the user message we just saved)
     const history: ChatMessage[] = recentMessages.slice(0, -1).map((m) => ({
       role: m.role as "user" | "assistant",
@@ -133,7 +170,7 @@ export async function POST(req: NextRequest) {
     const { system: systemPrompt, messages: msgs } = buildChatMessages(
       history,
       trimmedMessage,
-      mode,
+      safeMode,
       { userName: dbUser.name ?? undefined }
     );
 
@@ -165,7 +202,7 @@ export async function POST(req: NextRequest) {
         try {
           const response = getClient().messages.stream({
             model: MODEL,
-            max_tokens: mode === "build" ? 100000 : 16000,
+            max_tokens: safeMode === "build" ? 100000 : 16000,
             system: systemPrompt,
             messages: msgs,
           });
@@ -197,7 +234,7 @@ export async function POST(req: NextRequest) {
 
           // Save the full sanitized assistant message to DB
           const sanitizedFull = sanitizeResponse(fullRawContent);
-          await createMessage(conversationId!, "assistant", sanitizedFull);
+          await createMessage(conversationId!, "assistant", sanitizedFull, null, dbUser.id);
 
           // Auto-title on first message
           if (isFirstMessage) {

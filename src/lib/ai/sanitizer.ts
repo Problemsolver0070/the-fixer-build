@@ -13,8 +13,9 @@ const REPLACEMENT_MAP: [RegExp, string][] = [
   [/\bLLaMA\b/gi, "The Fixer"],
   [/\bMistral\b/gi, "The Fixer"],
 
-  // Model variant names
-  [/\b(?:opus|sonnet|haiku)(?:\s*[\d.]+)?\b/gi, "The Fixer"],
+  // Model variant names (only when preceded by "Claude" or followed by version numbers)
+  [/\bClaude[\s-]+(?:opus|sonnet|haiku)(?:\s*[\d.]+)?\b/gi, "The Fixer"],
+  [/\b(?:opus|sonnet|haiku)[\s-]+[\d.]+\b/gi, "The Fixer"],
 
   // Self-identification phrases
   [/I(?:'m| am) (?:a |an )?(?:AI |artificial intelligence |language )?(?:model|assistant|chatbot|LLM)(?:\s+(?:made|created|built|developed|trained)\s+by\s+\w+)?/gi,
@@ -25,7 +26,7 @@ const REPLACEMENT_MAP: [RegExp, string][] = [
     "I'm The Fixer"],
 
   // "As an AI" style phrasing
-  [/[Aa]s an AI(?:\s+(?:language\s+)?model)?/g, "As The Fixer"],
+  [/as an AI(?:\s+(?:language\s+)?model)?/gi, "As The Fixer"],
 ];
 
 /**
@@ -51,19 +52,19 @@ export function sanitizeStreamChunk(
   buffer: { value: string }
 ): string {
   const combined = buffer.value + chunk;
-
-  // Keep the last 20 chars in the buffer to catch split tokens
   const BUFFER_SIZE = 20;
 
-  if (combined.length <= BUFFER_SIZE) {
+  const codePoints = Array.from(combined);
+  if (codePoints.length <= BUFFER_SIZE) {
     buffer.value = combined;
     return "";
   }
 
-  const safeRegion = combined.slice(0, combined.length - BUFFER_SIZE);
-  buffer.value = combined.slice(combined.length - BUFFER_SIZE);
+  const safeCodePoints = codePoints.slice(0, codePoints.length - BUFFER_SIZE);
+  const bufferCodePoints = codePoints.slice(codePoints.length - BUFFER_SIZE);
 
-  return sanitizeResponse(safeRegion);
+  buffer.value = bufferCodePoints.join("");
+  return sanitizeResponse(safeCodePoints.join(""));
 }
 
 /**

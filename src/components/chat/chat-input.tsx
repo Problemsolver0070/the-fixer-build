@@ -9,7 +9,7 @@ import { useChatStore } from "@/stores/chat-store";
 import { AttachmentButton, uploadFile } from "./attachment-button";
 import { AttachmentPreview } from "./attachment-preview";
 import type { PendingAttachment, Attachment } from "@/lib/types/attachment";
-import { detectCategory } from "@/lib/types/attachment";
+import { detectCategory, isAllowedFile, MAX_FILE_SIZE } from "@/lib/types/attachment";
 
 const CHAT_API_URL =
   process.env.NEXT_PUBLIC_CHAT_API_URL || "/api/chat";
@@ -81,7 +81,7 @@ export function ChatInput({
     if ((!trimmed && readyAttachments.length === 0) || isStreaming) return;
 
     // Add user message to store immediately
-    const tempUserId = `user-${Date.now()}`;
+    const tempUserId = crypto.randomUUID();
     addMessage({
       id: tempUserId,
       role: "user",
@@ -91,6 +91,7 @@ export function ChatInput({
     });
 
     setValue("");
+    pendingAttachments.forEach((p) => { if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
     setPendingAttachments([]);
     setStreaming(true);
     clearStreamContent();
@@ -123,7 +124,7 @@ export function ChatInput({
       if (!res.ok) {
         if (res.status === 402) {
           addMessage({
-            id: `error-${Date.now()}`,
+            id: crypto.randomUUID(),
             role: "assistant",
             content:
               "Your trial has expired. Please upgrade to continue using The Fixer.",
@@ -135,7 +136,7 @@ export function ChatInput({
 
         const errorData = await res.json().catch(() => null);
         addMessage({
-          id: `error-${Date.now()}`,
+          id: crypto.randomUUID(),
           role: "assistant",
           content:
             errorData?.error || "Something went wrong. Please try again.",
@@ -191,7 +192,7 @@ export function ChatInput({
                 break;
 
               case "done": {
-                const assistantId = `assistant-${Date.now()}`;
+                const assistantId = crypto.randomUUID();
                 finalizeStream(assistantId);
 
                 // Parse <bricks-files> from full content if in build mode
@@ -208,8 +209,26 @@ export function ChatInput({
                       const incomplete = fullContent.match(/<bricks-files>\s*([\s\S]*)/);
                       if (incomplete) {
                         bricksJson = incomplete[1];
-                        const lastObj = bricksJson.lastIndexOf("}");
-                        if (lastObj > 0) bricksJson = bricksJson.slice(0, lastObj + 1) + "]";
+                        let depth = 0;
+                        let lastCompleteEnd = -1;
+                        for (let i = 0; i < bricksJson.length; i++) {
+                          const ch = bricksJson[i];
+                          if (ch === '"') {
+                            i++;
+                            while (i < bricksJson.length && bricksJson[i] !== '"') {
+                              if (bricksJson[i] === '\\') i++;
+                              i++;
+                            }
+                          } else if (ch === '{') {
+                            depth++;
+                          } else if (ch === '}') {
+                            depth--;
+                            if (depth === 0) lastCompleteEnd = i;
+                          }
+                        }
+                        if (lastCompleteEnd > 0) {
+                          bricksJson = bricksJson.slice(0, lastCompleteEnd + 1) + "]";
+                        }
                       }
                     }
                     if (bricksJson) {
@@ -224,9 +243,9 @@ export function ChatInput({
               }
 
               case "error":
-                finalizeStream(`error-${Date.now()}`);
+                finalizeStream(crypto.randomUUID());
                 addMessage({
-                  id: `error-${Date.now()}`,
+                  id: crypto.randomUUID(),
                   role: "assistant",
                   content: data.message,
                   createdAt: new Date().toISOString(),
@@ -240,14 +259,14 @@ export function ChatInput({
       }
 
       // If stream ended without a "done" event, finalize anyway
-      if (isStreaming) {
-        finalizeStream(`assistant-${Date.now()}`);
+      if (useChatStore.getState().isStreaming) {
+        finalizeStream(crypto.randomUUID());
       }
     } catch (err) {
       console.error("Chat send error:", err);
       setStreaming(false);
       addMessage({
-        id: `error-${Date.now()}`,
+        id: crypto.randomUUID(),
         role: "assistant",
         content: "Network error. Please check your connection and try again.",
         createdAt: new Date().toISOString(),
@@ -294,7 +313,10 @@ export function ChatInput({
         e.preventDefault();
         e.stopPropagation();
         if (e.dataTransfer.files.length > 0) {
-          const files = Array.from(e.dataTransfer.files);
+          const files = Array.from(e.dataTransfer.files).filter(
+            (file) => isAllowedFile(file.type, file.name) && file.size <= MAX_FILE_SIZE
+          );
+          if (files.length === 0) return;
           const pending: PendingAttachment[] = files.map((file) => ({
             id: crypto.randomUUID(),
             file,

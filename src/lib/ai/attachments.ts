@@ -22,7 +22,17 @@ export async function buildContentBlocks(
 
   const blocks: ContentBlock[] = [];
 
+  const MAX_BLOB_SIZE = 25 * 1024 * 1024; // 25MB
+
   for (const att of attachments) {
+    if (att.size > MAX_BLOB_SIZE) {
+      blocks.push({
+        type: "text",
+        text: `[File "${att.filename}" is too large (${(att.size / (1024 * 1024)).toFixed(1)}MB). Maximum allowed size is 25MB.]`,
+      });
+      continue;
+    }
+
     const data = await downloadBlob(att.blobKey);
 
     if (att.category === "image") {

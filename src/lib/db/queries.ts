@@ -119,11 +119,21 @@ export async function deleteConversation(
 
 export async function getMessages(
   conversationId: string,
-  userId: string
+  userId: string,
+  limit?: number
 ): Promise<Message[]> {
-  // Verify the user owns this conversation before returning messages
   const conversation = await getConversation(conversationId, userId);
   if (!conversation) return [];
+
+  if (limit) {
+    const result = await db
+      .select()
+      .from(messages)
+      .where(eq(messages.conversationId, conversationId))
+      .orderBy(desc(messages.createdAt))
+      .limit(limit);
+    return result.reverse();
+  }
 
   return db
     .select()
@@ -136,8 +146,16 @@ export async function createMessage(
   conversationId: string,
   role: string,
   content: string,
-  attachments?: Attachment[] | null
+  attachments?: Attachment[] | null,
+  userId?: string
 ): Promise<Message> {
+  if (userId) {
+    const conv = await getConversation(conversationId, userId);
+    if (!conv) {
+      throw new Error("Conversation not found or access denied");
+    }
+  }
+
   const [message] = await db
     .insert(messages)
     .values({

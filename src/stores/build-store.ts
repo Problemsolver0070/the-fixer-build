@@ -35,7 +35,7 @@ function pickInitialFile(files: Record<string, string>): string | null {
   const ts = paths.find((p) => p.endsWith(".ts"));
   if (ts) return ts;
 
-  const app = paths.find((p) => /app/i.test(p));
+  const app = paths.find((p) => /\bApp\b/i.test(p));
   if (app) return app;
 
   return paths[0];
@@ -71,9 +71,15 @@ export const useBuildStore = create<BuildState>((set) => ({
   setRunning: (running) => set({ isRunning: running }),
 
   appendTerminalOutput: (text) =>
-    set((state) => ({
-      terminalOutput: state.terminalOutput + text,
-    })),
+    set((state) => {
+      const MAX_TERMINAL_LENGTH = 100_000;
+      const combined = state.terminalOutput + text;
+      return {
+        terminalOutput: combined.length > MAX_TERMINAL_LENGTH
+          ? combined.slice(combined.length - MAX_TERMINAL_LENGTH)
+          : combined,
+      };
+    }),
 
   clearTerminalOutput: () => set({ terminalOutput: "" }),
 

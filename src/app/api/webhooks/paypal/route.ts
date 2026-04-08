@@ -4,6 +4,7 @@ import { upsertSubscription, updateUserPlan, getSubscription } from "@/lib/db/qu
 import { db } from "@/lib/db";
 import { users } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
+import { isValidUUID } from "@/lib/utils";
 
 export async function POST(req: NextRequest) {
   try {
@@ -65,8 +66,8 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error("PayPal webhook error:", err);
     return NextResponse.json(
-      { error: "Webhook processing failed" },
-      { status: 500 }
+      { received: true, error: "processing_failed" },
+      { status: 200 }
     );
   }
 }
@@ -79,6 +80,16 @@ async function handleSubscriptionActivated(resource: PayPalWebhookResource) {
 
   if (!userId || !paypalSubscriptionId) {
     console.error("Missing custom_id or subscription id in ACTIVATED event");
+    return;
+  }
+
+  if (!isValidUUID(userId)) {
+    console.error("Invalid custom_id format:", userId);
+    return;
+  }
+  const [userExists] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
+  if (!userExists) {
+    console.error("custom_id does not match any user:", userId);
     return;
   }
 
@@ -124,6 +135,16 @@ async function handleSubscriptionDeactivated(
     return;
   }
 
+  if (!isValidUUID(userId)) {
+    console.error("Invalid custom_id format:", userId);
+    return;
+  }
+  const [userExists] = await db.select({ id: users.id }).from(users).where(eq(users.id, userId));
+  if (!userExists) {
+    console.error("custom_id does not match any user:", userId);
+    return;
+  }
+
   const status =
     eventType === "BILLING.SUBSCRIPTION.CANCELLED" ? "cancelled" : "suspended";
 
@@ -134,9 +155,16 @@ async function handleSubscriptionDeactivated(
     status,
   });
 
-  // Only downgrade plan if cancelled (suspended might be retried)
+  // Only downgrade plan if cancelled and the current period has already ended.
+  // If the period is still active, the access check in chat/route.ts handles
+  // expiration via currentPeriodEnd, so we keep the user on "pro" until then.
   if (status === "cancelled") {
-    await updateUserPlan(userId, "trial");
+    const existingSub = await getSubscription(userId);
+    const periodEnd = existingSub?.currentPeriodEnd ? new Date(existingSub.currentPeriodEnd) : null;
+    if (!periodEnd || periodEnd <= new Date()) {
+      await updateUserPlan(userId, "trial");
+    }
+    // else: user stays on "pro" until currentPeriodEnd passes
   }
 
   console.log(`Subscription ${status} for user ${userId}`);
@@ -178,16 +206,24 @@ async function handlePaymentCompleted(resource: PayPalWebhookResource) {
   }
 
   // Extend the billing period
-  const now = new Date();
-  const nextPeriodEnd = new Date(now);
-  nextPeriodEnd.setMonth(nextPeriodEnd.getMonth() + 1);
+  const existingSub = await getSubscription(userId);
+  const baseDate = existingSub?.currentPeriodEnd && new Date(existingSub.currentPeriodEnd) > new Date()
+    ? new Date(existingSub.currentPeriodEnd)
+    : new Date();
+  const nextPeriodEnd = new Date(baseDate);
+  const targetMonth = nextPeriodEnd.getMonth() + 1;
+  nextPeriodEnd.setMonth(targetMonth);
+  if (nextPeriodEnd.getMonth() !== targetMonth % 12) {
+    nextPeriodEnd.setDate(0); // last day of previous month
+  }
+  const periodStart = new Date(baseDate);
 
   await upsertSubscription({
     userId,
     paypalSubscriptionId: billingAgreementId,
     plan: "pro",
     status: "active",
-    currentPeriodStart: now,
+    currentPeriodStart: periodStart,
     currentPeriodEnd: nextPeriodEnd,
   });
 

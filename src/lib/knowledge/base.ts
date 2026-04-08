@@ -43,18 +43,16 @@ export function getKnowledgeContext(query: string): string | undefined {
   const lowerQuery = query.toLowerCase();
   const keywords = [
     "bricks",
-    "platform",
-    "how do",
-    "what is",
-    "help",
+    "the fixer",
     "pricing",
     "plan",
     "trial",
     "build mode",
     "chat mode",
-    "the fixer",
     "subscribe",
     "billing",
+    "upgrade",
+    "pro plan",
   ];
 
   if (keywords.some((kw) => lowerQuery.includes(kw))) {

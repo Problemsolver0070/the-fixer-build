@@ -90,17 +90,29 @@ function getBlobServiceClient() {
   return _blobServiceClient;
 }
 
-async function downloadBlob(blobKey) {
+async function downloadBlob(blobKey, maxSizeBytes = 25 * 1024 * 1024) {
   const client = getBlobServiceClient();
   const container = client.getContainerClient(
     process.env.AZURE_STORAGE_CONTAINER || "uploads"
   );
   const blockBlob = container.getBlockBlobClient(blobKey);
+
+  const properties = await blockBlob.getProperties();
+  if (properties.contentLength && properties.contentLength > maxSizeBytes) {
+    throw new Error(`Blob size ${properties.contentLength} exceeds limit of ${maxSizeBytes}`);
+  }
+
   const response = await blockBlob.download(0);
   const chunks = [];
+  let totalSize = 0;
   if (response.readableStreamBody) {
     for await (const chunk of response.readableStreamBody) {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalSize += buf.length;
+      if (totalSize > maxSizeBytes) {
+        throw new Error(`Download exceeded size limit of ${maxSizeBytes} bytes`);
+      }
+      chunks.push(buf);
     }
   }
   return Buffer.concat(chunks);
@@ -111,7 +123,15 @@ async function buildContentBlocks(text, attachments) {
 
   const blocks = [];
 
+  const MAX_BLOB_SIZE = 25 * 1024 * 1024;
   for (const att of attachments) {
+    if (att.size > MAX_BLOB_SIZE) {
+      blocks.push({
+        type: "text",
+        text: `[File "${att.filename}" is too large to process (${(att.size / 1024 / 1024).toFixed(1)} MB)]`,
+      });
+      continue;
+    }
     const data = await downloadBlob(att.blobKey);
 
     if (att.category === "image") {
@@ -172,14 +192,15 @@ const REPLACEMENT_MAP = [
   [/\bGemini\b/gi, "The Fixer"],
   [/\bLLaMA\b/gi, "The Fixer"],
   [/\bMistral\b/gi, "The Fixer"],
-  [/\b(?:opus|sonnet|haiku)(?:\s*[\d.]+)?\b/gi, "The Fixer"],
+  [/\bClaude[\s-]+(?:opus|sonnet|haiku)(?:\s*[\d.]+)?\b/gi, "The Fixer"],
+  [/\b(?:opus|sonnet|haiku)[\s-]+[\d.]+\b/gi, "The Fixer"],
   [/I(?:'m| am) (?:a |an )?(?:AI |artificial intelligence |language )?(?:model|assistant|chatbot|LLM)(?:\s+(?:made|created|built|developed|trained)\s+by\s+\w+)?/gi,
     "I'm The Fixer, built by the Bricks team"],
   [/(?:made|created|built|developed|trained)\s+by\s+(?:Anthropic|OpenAI|Google|Meta)/gi,
     "built by the Bricks team"],
   [/(?:I(?:'m| am) )?(?:based on|powered by)\s+(?:Claude|GPT|Gemini|LLaMA|Mistral)[\w\s.-]*/gi,
     "I'm The Fixer"],
-  [/[Aa]s an AI(?:\s+(?:language\s+)?model)?/g, "As The Fixer"],
+  [/as an AI(?:\s+(?:language\s+)?model)?/gi, "As The Fixer"],
 ];
 
 function sanitizeResponse(text) {
@@ -194,14 +215,17 @@ function sanitizeStreamChunk(chunk, buffer) {
   const combined = buffer.value + chunk;
   const BUFFER_SIZE = 20;
 
-  if (combined.length <= BUFFER_SIZE) {
+  const codePoints = Array.from(combined);
+  if (codePoints.length <= BUFFER_SIZE) {
     buffer.value = combined;
     return "";
   }
 
-  const safeRegion = combined.slice(0, combined.length - BUFFER_SIZE);
-  buffer.value = combined.slice(combined.length - BUFFER_SIZE);
-  return sanitizeResponse(safeRegion);
+  const safeCodePoints = codePoints.slice(0, codePoints.length - BUFFER_SIZE);
+  const bufferCodePoints = codePoints.slice(codePoints.length - BUFFER_SIZE);
+
+  buffer.value = bufferCodePoints.join("");
+  return sanitizeResponse(safeCodePoints.join(""));
 }
 
 function flushBuffer(buffer) {
@@ -315,11 +339,21 @@ async function createConversation(userId, mode) {
   return conversation;
 }
 
-async function getMessages(conversationId, userId) {
+async function getMessages(conversationId, userId, limit) {
   const db = getDb();
   // Verify ownership
   const conversation = await getConversation(conversationId, userId);
   if (!conversation) return [];
+
+  if (limit) {
+    const result = await db
+      .select()
+      .from(messages)
+      .where(eq(messages.conversationId, conversationId))
+      .orderBy(desc(messages.createdAt))
+      .limit(limit);
+    return result.reverse();
+  }
 
   return db
     .select()
@@ -473,6 +507,10 @@ export const handler = awslambda.streamifyResponse(
           writeErrorAndClose(responseStream, 402, "Trial expired. Please upgrade.");
           return;
         }
+        if (subscription.currentPeriodEnd && new Date(subscription.currentPeriodEnd) < new Date()) {
+          writeErrorAndClose(responseStream, 402, "Subscription expired. Please renew.");
+          return;
+        }
       }
 
       // 4. ── Parse body ─────────────────────────────────────────────────
@@ -496,6 +534,31 @@ export const handler = awslambda.streamifyResponse(
         return;
       }
 
+      // Validate input sizes
+      if (trimmedMessage.length > 50_000) {
+        writeErrorAndClose(responseStream, 400, "Message too long (max 50,000 characters)");
+        return;
+      }
+      if (incomingAttachments && incomingAttachments.length > 10) {
+        writeErrorAndClose(responseStream, 400, "Too many attachments (max 10)");
+        return;
+      }
+
+      // Validate attachment ownership
+      if (incomingAttachments?.length) {
+        const prefix = `uploads/${dbUser.id}/`;
+        for (const att of incomingAttachments) {
+          if (!att.blobKey || typeof att.blobKey !== "string" || !att.blobKey.startsWith(prefix) || att.blobKey.includes("..")) {
+            writeErrorAndClose(responseStream, 403, "Invalid attachment");
+            return;
+          }
+        }
+      }
+
+      // Validate mode
+      const validModes = ["chat", "build"];
+      const safeMode = validModes.includes(mode) ? mode : "chat";
+
       // 5. ── Conversation — create if needed ────────────────────────────
       let conversationId = incomingConversationId;
       let isFirstMessage = false;
@@ -507,7 +570,7 @@ export const handler = awslambda.streamifyResponse(
           return;
         }
       } else {
-        const conversation = await createConversation(dbUser.id, mode);
+        const conversation = await createConversation(dbUser.id, safeMode);
         conversationId = conversation.id;
         isFirstMessage = true;
       }
@@ -516,8 +579,7 @@ export const handler = awslambda.streamifyResponse(
       await createMessage(conversationId, "user", trimmedMessage, incomingAttachments?.length ? incomingAttachments : null);
 
       // 7. ── Load last 50 messages as history ───────────────────────────
-      const allMessages = await getMessages(conversationId, dbUser.id);
-      const recentMessages = allMessages.slice(-50);
+      const recentMessages = await getMessages(conversationId, dbUser.id, 50);
       const history = recentMessages.slice(0, -1).map((m) => ({
         role: m.role,
         content: summarizeAttachments(m.content, m.attachments),
@@ -527,7 +589,7 @@ export const handler = awslambda.streamifyResponse(
       const { system: systemPrompt, messages: msgs } = buildChatMessages(
         history,
         trimmedMessage,
-        mode,
+        safeMode,
         { userName: dbUser.name ?? undefined }
       );
 
@@ -539,7 +601,7 @@ export const handler = awslambda.streamifyResponse(
         }
       }
 
-      console.log("[Lambda] Starting AI stream, mode:", mode, "conversation:", conversationId);
+      console.log("[Lambda] Starting AI stream, mode:", safeMode, "conversation:", conversationId);
 
       // 9. ── Start SSE streaming response ───────────────────────────────
       const metadata = {
@@ -562,7 +624,7 @@ export const handler = awslambda.streamifyResponse(
       try {
         const aiResponse = getAIClient().messages.stream({
           model: MODEL,
-          max_tokens: mode === "build" ? 100000 : 16000,
+          max_tokens: safeMode === "build" ? 100000 : 16000,
           system: systemPrompt,
           messages: msgs,
         });
