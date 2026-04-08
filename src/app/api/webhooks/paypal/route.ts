@@ -2,12 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { verifyWebhookSignature } from "@/lib/paypal/client";
 import {
   getPurchaseByOrderId,
+  claimPurchaseForCompletion,
   updatePurchaseStatus,
-  getUserAccess,
-  upsertUserAccess,
-  updateUserPlan,
 } from "@/lib/db/queries";
 import { getProduct } from "@/lib/access/products";
+import { grantTimeForPurchase, revokeTimeForPurchase } from "@/lib/access/grant";
 
 export async function POST(req: NextRequest) {
   try {
@@ -95,7 +94,12 @@ async function handleCaptureCompleted(resource: Record<string, unknown>) {
     return;
   }
 
-  await updatePurchaseStatus(orderId, "completed", captureId);
+  // Atomically claim this purchase — prevents double-grant if capture endpoint races
+  const claimed = await claimPurchaseForCompletion(orderId, captureId);
+  if (!claimed) {
+    console.log(`Purchase for order ${orderId} already claimed by another handler`);
+    return;
+  }
 
   const product = getProduct(purchase.passType);
   if (!product) {
@@ -103,46 +107,7 @@ async function handleCaptureCompleted(resource: Record<string, unknown>) {
     return;
   }
 
-  const now = new Date();
-  const currentAccess = await getUserAccess(purchase.userId);
-
-  if (product.isPausable) {
-    const currentSeconds = currentAccess?.pausableRemainingSeconds ?? 0;
-    const currentStatus = currentAccess?.pausableStatus ?? "none";
-
-    let snapshotSeconds = currentSeconds;
-    if (
-      currentStatus === "active" &&
-      currentAccess?.pausableLastResumedAt
-    ) {
-      const elapsed =
-        (now.getTime() -
-          new Date(currentAccess.pausableLastResumedAt).getTime()) /
-        1000;
-      snapshotSeconds = Math.max(0, Math.floor(currentSeconds - elapsed));
-    }
-
-    await upsertUserAccess(purchase.userId, {
-      pausableRemainingSeconds: snapshotSeconds + product.durationSeconds,
-      pausableStatus: "active",
-      pausableLastResumedAt: now,
-    });
-  } else {
-    const currentExpiry = currentAccess?.continuousExpiresAt
-      ? new Date(currentAccess.continuousExpiresAt)
-      : null;
-    const baseTime =
-      currentExpiry && currentExpiry > now ? currentExpiry : now;
-    const newExpiry = new Date(
-      baseTime.getTime() + product.durationSeconds * 1000
-    );
-
-    await upsertUserAccess(purchase.userId, {
-      continuousExpiresAt: newExpiry,
-    });
-  }
-
-  await updateUserPlan(purchase.userId, "active");
+  await grantTimeForPurchase(purchase.userId, product);
   console.log(`Webhook: capture completed for order ${orderId}`);
 }
 
@@ -171,27 +136,7 @@ async function handleCaptureFailed(
   if (purchase && purchase.status === "completed") {
     const product = getProduct(purchase.passType);
     if (product) {
-      const currentAccess = await getUserAccess(purchase.userId);
-      if (currentAccess) {
-        if (product.isPausable) {
-          const newSeconds = Math.max(
-            0,
-            currentAccess.pausableRemainingSeconds - product.durationSeconds
-          );
-          await upsertUserAccess(purchase.userId, {
-            pausableRemainingSeconds: newSeconds,
-            pausableStatus: newSeconds <= 0 ? "none" : currentAccess.pausableStatus as string,
-          });
-        } else if (currentAccess.continuousExpiresAt) {
-          const newExpiry = new Date(
-            new Date(currentAccess.continuousExpiresAt).getTime() -
-              product.durationSeconds * 1000
-          );
-          await upsertUserAccess(purchase.userId, {
-            continuousExpiresAt: newExpiry > new Date() ? newExpiry : null,
-          });
-        }
-      }
+      await revokeTimeForPurchase(purchase.userId, product);
     }
   }
 

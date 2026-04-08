@@ -3,13 +3,12 @@ import { auth } from "@clerk/nextjs/server";
 import {
   getUserByClerkId,
   getPurchaseByOrderId,
+  claimPurchaseForCompletion,
   updatePurchaseStatus,
-  getUserAccess,
-  upsertUserAccess,
-  updateUserPlan,
 } from "@/lib/db/queries";
 import { capturePayPalOrder } from "@/lib/paypal/orders";
 import { getProduct } from "@/lib/access/products";
+import { grantTimeForPurchase } from "@/lib/access/grant";
 
 export async function POST(req: NextRequest) {
   try {
@@ -56,7 +55,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    await updatePurchaseStatus(orderId, "completed", capture.captureId ?? undefined);
+    // Atomically claim this purchase — prevents double-grant if webhook races
+    const claimed = await claimPurchaseForCompletion(orderId, capture.captureId ?? undefined);
+    if (!claimed) {
+      // Another handler (webhook) already processed this purchase
+      return NextResponse.json({ success: true, alreadyProcessed: true });
+    }
 
     const product = getProduct(purchase.passType);
     if (!product) {
@@ -67,49 +71,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const now = new Date();
-    const currentAccess = await getUserAccess(dbUser.id);
-
-    if (product.isPausable) {
-      const currentSeconds = currentAccess?.pausableRemainingSeconds ?? 0;
-      const currentStatus = currentAccess?.pausableStatus ?? "none";
-
-      let snapshotSeconds = currentSeconds;
-      if (
-        currentStatus === "active" &&
-        currentAccess?.pausableLastResumedAt
-      ) {
-        const elapsed =
-          (now.getTime() -
-            new Date(currentAccess.pausableLastResumedAt).getTime()) /
-          1000;
-        snapshotSeconds = Math.max(0, Math.floor(currentSeconds - elapsed));
-      }
-
-      const newSeconds = snapshotSeconds + product.durationSeconds;
-
-      await upsertUserAccess(dbUser.id, {
-        pausableRemainingSeconds: newSeconds,
-        pausableStatus: "active",
-        pausableLastResumedAt: now,
-      });
-    } else {
-      const currentExpiry = currentAccess?.continuousExpiresAt
-        ? new Date(currentAccess.continuousExpiresAt)
-        : null;
-
-      const baseTime =
-        currentExpiry && currentExpiry > now ? currentExpiry : now;
-      const newExpiry = new Date(
-        baseTime.getTime() + product.durationSeconds * 1000
-      );
-
-      await upsertUserAccess(dbUser.id, {
-        continuousExpiresAt: newExpiry,
-      });
-    }
-
-    await updateUserPlan(dbUser.id, "active");
+    await grantTimeForPurchase(dbUser.id, product);
 
     return NextResponse.json({ success: true });
   } catch (err) {

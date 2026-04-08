@@ -34,16 +34,6 @@ async function hasAccessCheck(user: {
   plan: string;
   trialExpiresAt: Date | null;
 }): Promise<boolean> {
-  // Trial check
-  if (
-    user.plan === "trial" &&
-    user.trialExpiresAt &&
-    new Date(user.trialExpiresAt) > new Date()
-  ) {
-    return true;
-  }
-
-  // Purchased access check
   const access = await getUserAccess(user.id);
   const state = computeAccessState(access ?? null, user.trialExpiresAt);
   return state.hasAccess;

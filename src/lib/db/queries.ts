@@ -405,6 +405,26 @@ export async function updatePurchaseStatus(
   return purchase;
 }
 
+/**
+ * Atomically claim a pending purchase for completion.
+ * Returns the purchase if successfully claimed (status transitioned from 'pending' to 'completed'),
+ * or undefined if another handler already claimed it. This prevents double-granting of time
+ * when the capture endpoint and webhook race.
+ */
+export async function claimPurchaseForCompletion(
+  paypalOrderId: string,
+  paypalCaptureId?: string
+): Promise<Purchase | undefined> {
+  const set: Record<string, unknown> = { status: "completed" };
+  if (paypalCaptureId) set.paypalCaptureId = paypalCaptureId;
+  const [purchase] = await db
+    .update(purchases)
+    .set(set)
+    .where(and(eq(purchases.paypalOrderId, paypalOrderId), eq(purchases.status, "pending")))
+    .returning();
+  return purchase;
+}
+
 export async function getUserPurchases(
   userId: string
 ): Promise<Purchase[]> {
