@@ -6,6 +6,20 @@ import { getUserByClerkId, getConversations, getUserAccess } from "@/lib/db/quer
 import { computeAccessState } from "@/lib/access/check";
 import { AppLayoutClient } from "./app-layout-client";
 
+const DEFAULT_ACCESS_DATA: {
+  continuousRemaining: number;
+  pausableRemaining: number;
+  pausableStatus: "none" | "active" | "paused";
+  trialActive: boolean;
+  trialRemaining: number;
+} = {
+  continuousRemaining: 0,
+  pausableRemaining: 0,
+  pausableStatus: "none",
+  trialActive: false,
+  trialRemaining: 0,
+};
+
 export default async function AppLayout({
   children,
 }: {
@@ -22,41 +36,52 @@ export default async function AppLayout({
         plan="trial"
         trialExpiresAt={null}
         conversations={[]}
-        accessData={{
-          continuousRemaining: 0,
-          pausableRemaining: 0,
-          pausableStatus: "none",
-          trialActive: false,
-          trialRemaining: 0,
-        }}
+        accessData={DEFAULT_ACCESS_DATA}
       >
         {children}
       </AppLayoutClient>
     );
   }
 
-  const [conversations, access] = await Promise.all([
-    getConversations(dbUser.id),
-    getUserAccess(dbUser.id),
-  ]);
+  let conversations: Awaited<ReturnType<typeof getConversations>> = [];
+  let accessData = DEFAULT_ACCESS_DATA;
 
-  const state = computeAccessState(
-    access ?? null,
-    dbUser.trialExpiresAt
-  );
+  try {
+    const [convos, access] = await Promise.all([
+      getConversations(dbUser.id),
+      getUserAccess(dbUser.id).catch(() => undefined),
+    ]);
 
-  const trialActive =
-    dbUser.plan === "trial" &&
-    dbUser.trialExpiresAt !== null &&
-    new Date(dbUser.trialExpiresAt) > new Date();
-  const trialRemaining = trialActive
-    ? Math.max(
-        0,
-        Math.floor(
-          (new Date(dbUser.trialExpiresAt!).getTime() - Date.now()) / 1000
+    conversations = convos;
+
+    const state = computeAccessState(
+      access ?? null,
+      dbUser.trialExpiresAt
+    );
+
+    const trialActive =
+      dbUser.plan === "trial" &&
+      dbUser.trialExpiresAt !== null &&
+      new Date(dbUser.trialExpiresAt) > new Date();
+    const trialRemaining = trialActive
+      ? Math.max(
+          0,
+          Math.floor(
+            (new Date(dbUser.trialExpiresAt!).getTime() - Date.now()) / 1000
+          )
         )
-      )
-    : 0;
+      : 0;
+
+    accessData = {
+      continuousRemaining: state.continuousRemaining,
+      pausableRemaining: state.pausableRemaining,
+      pausableStatus: state.pausableStatus,
+      trialActive,
+      trialRemaining,
+    };
+  } catch (err) {
+    console.error("Failed to load access data in layout:", err);
+  }
 
   const serializedConversations = conversations.map((c) => ({
     id: c.id,
@@ -70,13 +95,7 @@ export default async function AppLayout({
       plan={dbUser.plan}
       trialExpiresAt={dbUser.trialExpiresAt?.toISOString() ?? null}
       conversations={serializedConversations}
-      accessData={{
-        continuousRemaining: state.continuousRemaining,
-        pausableRemaining: state.pausableRemaining,
-        pausableStatus: state.pausableStatus,
-        trialActive,
-        trialRemaining,
-      }}
+      accessData={accessData}
     >
       {children}
     </AppLayoutClient>
