@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { Attachment } from "@/lib/types/attachment";
-import type { Citation } from "@/lib/ai/types";
+import type { Citation, ToolUseRecord, ImageRecord } from "@/lib/ai/types";
 
 // ─── Message Type ────────────────────────────────────────────────────────────
 
@@ -15,6 +15,10 @@ export interface ChatMessageItem {
   thinkingContent?: string;
   thinkingDurationMs?: number;
   citations?: Citation[];
+
+  // Phase 2: Tools + Images
+  toolResults?: ToolUseRecord[];
+  images?: ImageRecord[];
 }
 
 // ─── Streaming State ─────────────────────────────────────────────────────────
@@ -22,10 +26,15 @@ export interface ChatMessageItem {
 interface StreamingState {
   content: string;
   thinkingContent: string;
-  activeBlock: "thinking" | "text" | null;
+  activeBlock: "thinking" | "text" | "tool" | null;
   citations: Citation[];
   thinkingStartedAt: number | null;
   thinkingDurationMs: number | null;
+
+  // Phase 2: Tool streaming
+  activeTool: { name: string; toolUseId: string; input: string } | null;
+  toolResults: ToolUseRecord[];
+  images: ImageRecord[];
 }
 
 const EMPTY_STREAMING: StreamingState = {
@@ -35,6 +44,9 @@ const EMPTY_STREAMING: StreamingState = {
   citations: [],
   thinkingStartedAt: null,
   thinkingDurationMs: null,
+  activeTool: null,
+  toolResults: [],
+  images: [],
 };
 
 // ─── Store ───────────────────────────────────────────────────────────────────
@@ -63,6 +75,15 @@ interface ChatState {
 
   // Citations
   addCitation: (citation: Citation) => void;
+
+  // Tool streaming
+  startTool: (name: string, toolUseId: string) => void;
+  appendToolInput: (content: string) => void;
+  addToolResult: (result: ToolUseRecord) => void;
+  finishTool: () => void;
+
+  // Images
+  addImage: (image: ImageRecord) => void;
 
   // Finalize
   finalizeStream: (id: string) => void;
@@ -130,9 +151,57 @@ export const useChatStore = create<ChatState>((set, get) => ({
       },
     })),
 
+  // ── Tool streaming actions ──────────────────────────────────────────────
+
+  startTool: (name, toolUseId) =>
+    set((state) => ({
+      streaming: {
+        ...state.streaming,
+        activeBlock: "tool",
+        activeTool: { name, toolUseId, input: "" },
+      },
+    })),
+
+  appendToolInput: (content) =>
+    set((state) => ({
+      streaming: {
+        ...state.streaming,
+        activeTool: state.streaming.activeTool
+          ? { ...state.streaming.activeTool, input: state.streaming.activeTool.input + content }
+          : null,
+      },
+    })),
+
+  addToolResult: (result) =>
+    set((state) => ({
+      streaming: {
+        ...state.streaming,
+        toolResults: [...state.streaming.toolResults, result],
+      },
+    })),
+
+  finishTool: () =>
+    set((state) => ({
+      streaming: {
+        ...state.streaming,
+        activeBlock: state.streaming.content ? "text" : null,
+        activeTool: null,
+      },
+    })),
+
+  addImage: (image) =>
+    set((state) => ({
+      streaming: {
+        ...state.streaming,
+        images: [...state.streaming.images, image],
+      },
+    })),
+
+  // ── Finalize ────────────────────────────────────────────────────────────
+
   finalizeStream: (id) => {
     const { streaming } = get();
-    if (streaming.content || streaming.thinkingContent) {
+    if (streaming.content || streaming.thinkingContent || streaming.toolResults.length > 0) {
       set((state) => ({
         messages: [
           ...state.messages,
@@ -147,6 +216,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
               : undefined,
             citations: streaming.citations.length > 0
               ? streaming.citations
+              : undefined,
+            toolResults: streaming.toolResults.length > 0
+              ? streaming.toolResults
+              : undefined,
+            images: streaming.images.length > 0
+              ? streaming.images
               : undefined,
           },
         ],
