@@ -366,6 +366,7 @@ export async function* streamChat(
             result: resultText,
           });
 
+          yield { type: "tool_result", name: "write_files", toolUseId: toolBlock.id, content: resultText };
           yield { type: "tool_done", name: "write_files", toolUseId: toolBlock.id };
 
           toolResultMessages.push({

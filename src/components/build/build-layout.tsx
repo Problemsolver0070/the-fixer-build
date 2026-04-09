@@ -52,6 +52,7 @@ export function BuildLayout({
   const conversationIdRef = useRef<string | undefined>(_conversationId);
   const fullContentRef = useRef("");
   const assistantIdRef = useRef("");
+  const filesReceivedViaToolRef = useRef(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
 
   // Load initial files into store
@@ -148,6 +149,7 @@ export function BuildLayout({
       onImage: () => {},
       onFiles: (files) => {
         // Primary path: structured files from write_files tool
+        filesReceivedViaToolRef.current = true;
         const filesMap: Record<string, string> = {};
         for (const f of files) {
           filesMap[f.path] = f.content;
@@ -157,10 +159,14 @@ export function BuildLayout({
         }
       },
       onDone: () => {
-        const extractedFiles = extractFilesFromResponse(fullContentRef.current);
-        if (extractedFiles && Object.keys(extractedFiles).length > 0) {
-          handleFilesGenerated(extractedFiles);
+        // Fallback: only extract from text if write_files tool was NOT used
+        if (!filesReceivedViaToolRef.current) {
+          const extractedFiles = extractFilesFromResponse(fullContentRef.current);
+          if (extractedFiles && Object.keys(extractedFiles).length > 0) {
+            handleFilesGenerated(extractedFiles);
+          }
         }
+        filesReceivedViaToolRef.current = false;
       },
       onError: (message) => {
         setMessages((prev) =>

@@ -2,8 +2,9 @@ export const maxDuration = 120;
 
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest } from "next/server";
-import { buildChatMessages, type ChatMessage } from "@/lib/ai/prompts";
+import { buildChatMessages, reconstructToolHistory, type ChatMessage } from "@/lib/ai/prompts";
 import { buildContentBlocks, summarizeAttachments } from "@/lib/ai/attachments";
+import type { ToolUseRecord } from "@/lib/ai/types";
 import { streamChat } from "@/lib/ai/stream-handler";
 import type { Attachment } from "@/lib/types/attachment";
 import {
@@ -146,12 +147,16 @@ export async function POST(req: NextRequest) {
       dbUser.id
     );
 
-    // 7. Load history
+    // 7. Load history (include metadata for tool history reconstruction)
     const recentMessages = await getMessages(conversationId, dbUser.id, 50);
-    const history: ChatMessage[] = recentMessages.slice(0, -1).map((m) => ({
+    const historyWithMeta = recentMessages.slice(0, -1).map((m) => ({
       role: m.role as "user" | "assistant",
       content: summarizeAttachments(m.content, m.attachments as Attachment[] | null),
+      metadata: m.metadata as { toolUses?: ToolUseRecord[] } | null,
     }));
+
+    // Reconstruct tool use/result pairs for API compatibility
+    const history = reconstructToolHistory(historyWithMeta) as ChatMessage[];
 
     // 8. Build prompt
     const { system: systemPrompt, messages: msgs } = buildChatMessages(

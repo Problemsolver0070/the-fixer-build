@@ -74,7 +74,16 @@ export function executeWriteFiles(input: unknown): {
   resultText: string;
 } {
   const parsed = input as WriteFilesInput;
-  const files = parsed.files || [];
+
+  // Validate input structure
+  if (!parsed || !Array.isArray(parsed.files)) {
+    return { files: [], resultText: "Error: invalid input — expected { files: [...] }" };
+  }
+
+  const files = parsed.files.filter(
+    (f) => typeof f.path === "string" && typeof f.content === "string"
+  );
+
   return {
     files,
     resultText: `Files written successfully: ${files.map((f) => f.path).join(", ")}`,

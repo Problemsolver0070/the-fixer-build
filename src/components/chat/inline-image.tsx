@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo, useCallback, useEffect } from "react";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -11,7 +11,17 @@ interface InlineImageProps {
 
 export function InlineImage({ base64, mediaType }: InlineImageProps) {
   const [isOpen, setIsOpen] = useState(false);
-  const src = `data:${mediaType};base64,${base64}`;
+  const src = useMemo(() => `data:${mediaType};base64,${base64}`, [base64, mediaType]);
+
+  // Close lightbox on Escape key
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIsOpen(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen]);
 
   const extension = mediaType.split("/")[1]?.toUpperCase() || "IMG";
 
@@ -42,6 +52,7 @@ export function InlineImage({ base64, mediaType }: InlineImageProps) {
         >
           <button
             onClick={() => setIsOpen(false)}
+            aria-label="Close"
             className="absolute top-4 right-4 rounded-full bg-background/20 p-2 text-white hover:bg-background/40 transition-colors"
           >
             <X className="h-5 w-5" />
