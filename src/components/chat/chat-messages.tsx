@@ -8,12 +8,11 @@ import { MessageBubble } from "./message-bubble";
 export function ChatMessages() {
   const messages = useChatStore((s) => s.messages);
   const isStreaming = useChatStore((s) => s.isStreaming);
-  const streamingContent = useChatStore((s) => s.streamingContent);
+  const streaming = useChatStore((s) => s.streaming);
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isNearBottom = useRef(true);
 
-  // Track whether user is near the bottom of the scroll container
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -25,12 +24,11 @@ export function ChatMessages() {
     return () => container.removeEventListener("scroll", handleScroll);
   }, []);
 
-  // Auto-scroll to bottom only when user is near bottom
   useEffect(() => {
     if (isNearBottom.current) {
       bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [messages, streamingContent]);
+  }, [messages, streaming.content, streaming.thinkingContent]);
 
   // Empty state
   if (messages.length === 0 && !isStreaming) {
@@ -51,6 +49,15 @@ export function ChatMessages() {
     );
   }
 
+  // Determine if we should show the streaming message
+  const showStreamingMessage =
+    isStreaming &&
+    (streaming.content || streaming.thinkingContent || streaming.activeBlock === "thinking");
+
+  // Show waiting indicator only when streaming but nothing received yet
+  const showWaiting =
+    isStreaming && !streaming.content && !streaming.thinkingContent && streaming.activeBlock === null;
+
   return (
     <div ref={containerRef} className="flex-1 overflow-y-auto">
       <div className="mx-auto max-w-3xl py-4">
@@ -60,11 +67,14 @@ export function ChatMessages() {
             role={msg.role}
             content={msg.content}
             attachments={msg.attachments}
+            thinkingContent={msg.thinkingContent}
+            thinkingDurationMs={msg.thinkingDurationMs}
+            citations={msg.citations}
           />
         ))}
 
-        {/* Thinking indicator */}
-        {isStreaming && !streamingContent && (
+        {/* Waiting indicator (before any content arrives) */}
+        {showWaiting && (
           <div className="flex gap-3 px-4 py-3">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
               <Bot className="h-4 w-4" />
@@ -80,12 +90,15 @@ export function ChatMessages() {
           </div>
         )}
 
-        {/* Currently streaming message */}
-        {isStreaming && streamingContent && (
+        {/* Currently streaming message (thinking + text) */}
+        {showStreamingMessage && (
           <MessageBubble
             role="assistant"
-            content={streamingContent}
-            isStreaming
+            content={streaming.content}
+            isStreaming={streaming.activeBlock === "text"}
+            thinkingContent={streaming.thinkingContent || undefined}
+            isThinkingStreaming={streaming.activeBlock === "thinking"}
+            citations={streaming.citations.length > 0 ? streaming.citations : undefined}
           />
         )}
 
