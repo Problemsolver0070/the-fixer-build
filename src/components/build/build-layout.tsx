@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useRef } from "react";
+import { useChatStream } from "@/hooks/use-chat-stream";
 import { useAuth } from "@clerk/nextjs";
 import { useBuildStore } from "@/stores/build-store";
 import { CodeEditor } from "./code-editor";
@@ -15,9 +16,6 @@ import { AttachmentPreview } from "@/components/chat/attachment-preview";
 import { MessageAttachments } from "@/components/chat/message-attachments";
 import type { PendingAttachment, Attachment } from "@/lib/types/attachment";
 import { detectCategory, isAllowedFile, MAX_FILE_SIZE } from "@/lib/types/attachment";
-
-const CHAT_API_URL =
-  process.env.NEXT_PUBLIC_CHAT_API_URL || "/api/chat";
 
 // ─── Minimal Chat UI (inline) ────────────────────────────────────────────────
 // The chat components are being built by another agent and may not exist yet.
@@ -50,9 +48,10 @@ export function BuildLayout({
     initialMessages ?? []
   );
   const [input, setInput] = useState("");
-  const [isStreaming, setIsStreaming] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const conversationIdRef = useRef<string | undefined>(_conversationId);
+  const fullContentRef = useRef("");
+  const assistantIdRef = useRef("");
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
 
   // Load initial files into store
@@ -120,6 +119,47 @@ export function BuildLayout({
     [setFiles]
   );
 
+  const { sendMessage: streamSend, isStreaming } = useChatStream(
+    {
+      onConversationId: (id) => {
+        conversationIdRef.current = id;
+        if (!_conversationId) {
+          window.history.replaceState(null, "", `/build/${id}`);
+        }
+      },
+      onText: (content) => {
+        fullContentRef.current += content;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantIdRef.current
+              ? { ...m, content: fullContentRef.current }
+              : m
+          )
+        );
+      },
+      onThinkingStart: () => {},
+      onThinkingDelta: () => {},
+      onThinkingDone: () => {},
+      onCitation: () => {},
+      onDone: () => {
+        const extractedFiles = extractFilesFromResponse(fullContentRef.current);
+        if (extractedFiles && Object.keys(extractedFiles).length > 0) {
+          handleFilesGenerated(extractedFiles);
+        }
+      },
+      onError: (message) => {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantIdRef.current
+              ? { ...m, content: message || "Something went wrong." }
+              : m
+          )
+        );
+      },
+    },
+    getToken
+  );
+
   const handleSend = useCallback(async () => {
     const trimmed = input.trim();
     const readyAttachments: Attachment[] = pendingAttachments
@@ -134,107 +174,28 @@ export function BuildLayout({
       attachments: readyAttachments.length > 0 ? readyAttachments : undefined,
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    const assistantMessage: ChatMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: "",
+    };
+    assistantIdRef.current = assistantMessage.id;
+    fullContentRef.current = "";
+
+    setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setInput("");
     pendingAttachments.forEach((p) => { if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
     setPendingAttachments([]);
-    setIsStreaming(true);
 
-    try {
-      const token = await getToken();
-      const res = await fetch(CHAT_API_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          message: trimmed,
-          conversationId: conversationIdRef.current,
-          mode: "build",
-          attachments: readyAttachments.length > 0 ? readyAttachments : undefined,
-        }),
-      });
+    await streamSend({
+      message: trimmed,
+      conversationId: conversationIdRef.current,
+      mode: "build",
+      attachments: readyAttachments.length > 0 ? readyAttachments : undefined,
+    });
 
-      if (!res.ok) throw new Error("Chat request failed");
-
-      const reader = res.body?.getReader();
-      if (!reader) throw new Error("No response body");
-
-      const decoder = new TextDecoder();
-      let fullContent = "";
-      let sseBuffer = "";
-
-      const assistantMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: "",
-      };
-
-      setMessages((prev) => [...prev, assistantMessage]);
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        sseBuffer += decoder.decode(value, { stream: true });
-        const lines = sseBuffer.split("\n");
-        sseBuffer = lines.pop() ?? "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event = JSON.parse(line.slice(6));
-            if (event.type === "conversation_id") {
-              conversationIdRef.current = event.id;
-              // Update URL so the session is reloadable (without remounting)
-              if (!_conversationId) {
-                window.history.replaceState(null, "", `/build/${event.id}`);
-              }
-            } else if (event.type === "text") {
-              fullContent += event.content;
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantMessage.id
-                    ? { ...m, content: fullContent }
-                    : m
-                )
-              );
-            } else if (event.type === "error") {
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantMessage.id
-                    ? { ...m, content: event.message || "Something went wrong." }
-                    : m
-                )
-              );
-              setIsStreaming(false);
-              return;
-            }
-          } catch {
-            // skip malformed SSE lines
-          }
-        }
-      }
-
-      // Try to extract files from the response
-      const extractedFiles = extractFilesFromResponse(fullContent);
-      if (extractedFiles && Object.keys(extractedFiles).length > 0) {
-        handleFilesGenerated(extractedFiles);
-      }
-    } catch (error) {
-      console.error("Chat error:", error);
-      const errorMessage: ChatMessage = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: "Sorry, something went wrong. Please try again.",
-      };
-      setMessages((prev) => [...prev, errorMessage]);
-    } finally {
-      setIsStreaming(false);
-      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [input, isStreaming, handleFilesGenerated, getToken, pendingAttachments]);
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [input, isStreaming, handleFilesGenerated, streamSend, pendingAttachments]);
 
   return (
     <div className="flex h-full overflow-hidden">
