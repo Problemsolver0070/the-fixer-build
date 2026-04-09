@@ -6,13 +6,11 @@ import { useAuth } from "@clerk/nextjs";
 import { Send, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useChatStore } from "@/stores/chat-store";
+import { useChatStream } from "@/hooks/use-chat-stream";
 import { AttachmentButton, uploadFile } from "./attachment-button";
 import { AttachmentPreview } from "./attachment-preview";
 import type { PendingAttachment, Attachment } from "@/lib/types/attachment";
 import { detectCategory, isAllowedFile, MAX_FILE_SIZE } from "@/lib/types/attachment";
-
-const CHAT_API_URL =
-  process.env.NEXT_PUBLIC_CHAT_API_URL || "/api/chat";
 
 interface ChatInputProps {
   conversationId?: string;
@@ -30,18 +28,112 @@ export function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [value, setValue] = useState("");
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const fullContentRef = useRef("");
+  const currentConversationIdRef = useRef(conversationId);
 
-  const isStreaming = useChatStore((s) => s.isStreaming);
   const addMessage = useChatStore((s) => s.addMessage);
-  const setStreaming = useChatStore((s) => s.setStreaming);
+  const setStreamingFlag = useChatStore((s) => s.setStreaming);
   const appendStreamContent = useChatStore((s) => s.appendStreamContent);
   const clearStreamContent = useChatStore((s) => s.clearStreamContent);
   const finalizeStream = useChatStore((s) => s.finalizeStream);
+  const startThinking = useChatStore((s) => s.startThinking);
+  const appendThinkingContent = useChatStore((s) => s.appendThinkingContent);
+  const finishThinking = useChatStore((s) => s.finishThinking);
+  const addCitation = useChatStore((s) => s.addCitation);
+
+  const { sendMessage: streamSend, isStreaming } = useChatStream(
+    {
+      onConversationId: (id) => {
+        currentConversationIdRef.current = id;
+        if (!conversationId) {
+          const basePath = mode === "build" ? "/build" : "/chat";
+          router.replace(`${basePath}/${id}`);
+        }
+      },
+      onText: (content) => {
+        fullContentRef.current += content;
+        appendStreamContent(content);
+      },
+      onTitle: () => {
+        // Title set server-side; layout will refresh
+      },
+      onThinkingStart: () => {
+        startThinking();
+      },
+      onThinkingDelta: (content) => {
+        appendThinkingContent(content);
+      },
+      onThinkingDone: (durationMs) => {
+        finishThinking(durationMs);
+      },
+      onCitation: (citation) => {
+        addCitation(citation);
+      },
+      onDone: () => {
+        const assistantId = crypto.randomUUID();
+        finalizeStream(assistantId);
+
+        // Parse <bricks-files> if in build mode
+        if (mode === "build" && onFilesGenerated) {
+          try {
+            const fullContent = fullContentRef.current;
+            let bricksJson: string | undefined;
+            const complete = fullContent.match(
+              /<bricks-files>\s*([\s\S]*?)\s*<\/bricks-files>/
+            );
+            if (complete) {
+              bricksJson = complete[1];
+            } else {
+              const incomplete = fullContent.match(/<bricks-files>\s*([\s\S]*)/);
+              if (incomplete) {
+                bricksJson = incomplete[1];
+                let depth = 0;
+                let lastCompleteEnd = -1;
+                for (let i = 0; i < bricksJson.length; i++) {
+                  const ch = bricksJson[i];
+                  if (ch === '"') {
+                    i++;
+                    while (i < bricksJson.length && bricksJson[i] !== '"') {
+                      if (bricksJson[i] === '\\') i++;
+                      i++;
+                    }
+                  } else if (ch === '{') {
+                    depth++;
+                  } else if (ch === '}') {
+                    depth--;
+                    if (depth === 0) lastCompleteEnd = i;
+                  }
+                }
+                if (lastCompleteEnd > 0) {
+                  bricksJson = bricksJson.slice(0, lastCompleteEnd + 1) + "]";
+                }
+              }
+            }
+            if (bricksJson) {
+              const files = JSON.parse(bricksJson);
+              onFilesGenerated(files);
+            }
+          } catch {
+            // JSON parse failed — skip
+          }
+        }
+      },
+      onError: (message) => {
+        finalizeStream(crypto.randomUUID());
+        addMessage({
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: message,
+          createdAt: new Date().toISOString(),
+        });
+      },
+    },
+    getToken
+  );
 
   const handleFilesSelected = useCallback(
     async (newPending: PendingAttachment[]) => {
       setPendingAttachments((prev) => [...prev, ...newPending]);
-
       const token = await getToken();
       for (const pending of newPending) {
         try {
@@ -80,10 +172,9 @@ export function ChatInput({
       .map((p) => p.attachment!);
     if ((!trimmed && readyAttachments.length === 0) || isStreaming) return;
 
-    // Add user message to store immediately
-    const tempUserId = crypto.randomUUID();
+    // Add user message to store
     addMessage({
-      id: tempUserId,
+      id: crypto.randomUUID(),
       role: "user",
       content: trimmed,
       createdAt: new Date().toISOString(),
@@ -93,199 +184,23 @@ export function ChatInput({
     setValue("");
     pendingAttachments.forEach((p) => { if (p.previewUrl) URL.revokeObjectURL(p.previewUrl); });
     setPendingAttachments([]);
-    setStreaming(true);
+    setStreamingFlag(true);
     clearStreamContent();
+    fullContentRef.current = "";
 
-    // Auto-resize textarea back
     if (textareaRef.current) {
       textareaRef.current.style.height = "auto";
     }
 
-    let fullContent = "";
-    let currentConversationId = conversationId;
-
-    try {
-      const token = await getToken();
-      const res = await fetch(CHAT_API_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          message: trimmed,
-          conversationId,
-          mode,
-          attachments: readyAttachments.length > 0 ? readyAttachments : undefined,
-        }),
-      });
-
-      // Handle non-streaming error responses
-      if (!res.ok) {
-        if (res.status === 402) {
-          addMessage({
-            id: crypto.randomUUID(),
-            role: "assistant",
-            content:
-              "Your trial has expired. Please upgrade to continue using The Fixer.",
-            createdAt: new Date().toISOString(),
-          });
-          setStreaming(false);
-          return;
-        }
-
-        const errorData = await res.json().catch(() => null);
-        addMessage({
-          id: crypto.randomUUID(),
-          role: "assistant",
-          content:
-            errorData?.error || "Something went wrong. Please try again.",
-          createdAt: new Date().toISOString(),
-        });
-        setStreaming(false);
-        return;
-      }
-
-      // Read SSE stream
-      const reader = res.body?.getReader();
-      if (!reader) {
-        setStreaming(false);
-        return;
-      }
-
-      const decoder = new TextDecoder();
-      let sseBuffer = "";
-
-      while (true) {
-        const { done, value: chunk } = await reader.read();
-        if (done) break;
-
-        sseBuffer += decoder.decode(chunk, { stream: true });
-        const lines = sseBuffer.split("\n");
-
-        // Keep the last incomplete line in the buffer
-        sseBuffer = lines.pop() || "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-
-          try {
-            const data = JSON.parse(line.slice(6));
-
-            switch (data.type) {
-              case "conversation_id":
-                currentConversationId = data.id;
-                if (!conversationId) {
-                  // Navigate to the new conversation URL
-                  const basePath = mode === "build" ? "/build" : "/chat";
-                  router.replace(`${basePath}/${data.id}`);
-                }
-                break;
-
-              case "text":
-                fullContent += data.content;
-                appendStreamContent(data.content);
-                break;
-
-              case "title":
-                // Title was set server-side; router will refresh layout
-                break;
-
-              case "done": {
-                const assistantId = crypto.randomUUID();
-                finalizeStream(assistantId);
-
-                // Parse <bricks-files> from full content if in build mode
-                if (mode === "build" && onFilesGenerated) {
-                  try {
-                    let bricksJson: string | undefined;
-                    const complete = fullContent.match(
-                      /<bricks-files>\s*([\s\S]*?)\s*<\/bricks-files>/
-                    );
-                    if (complete) {
-                      bricksJson = complete[1];
-                    } else {
-                      // Handle truncated response
-                      const incomplete = fullContent.match(/<bricks-files>\s*([\s\S]*)/);
-                      if (incomplete) {
-                        bricksJson = incomplete[1];
-                        let depth = 0;
-                        let lastCompleteEnd = -1;
-                        for (let i = 0; i < bricksJson.length; i++) {
-                          const ch = bricksJson[i];
-                          if (ch === '"') {
-                            i++;
-                            while (i < bricksJson.length && bricksJson[i] !== '"') {
-                              if (bricksJson[i] === '\\') i++;
-                              i++;
-                            }
-                          } else if (ch === '{') {
-                            depth++;
-                          } else if (ch === '}') {
-                            depth--;
-                            if (depth === 0) lastCompleteEnd = i;
-                          }
-                        }
-                        if (lastCompleteEnd > 0) {
-                          bricksJson = bricksJson.slice(0, lastCompleteEnd + 1) + "]";
-                        }
-                      }
-                    }
-                    if (bricksJson) {
-                      const files = JSON.parse(bricksJson);
-                      onFilesGenerated(files);
-                    }
-                  } catch {
-                    // JSON parse failed — skip
-                  }
-                }
-                return;
-              }
-
-              case "error":
-                finalizeStream(crypto.randomUUID());
-                addMessage({
-                  id: crypto.randomUUID(),
-                  role: "assistant",
-                  content: data.message,
-                  createdAt: new Date().toISOString(),
-                });
-                return;
-            }
-          } catch {
-            // Skip malformed SSE lines
-          }
-        }
-      }
-
-      // If stream ended without a "done" event, finalize anyway
-      if (useChatStore.getState().isStreaming) {
-        finalizeStream(crypto.randomUUID());
-      }
-    } catch (err) {
-      console.error("Chat send error:", err);
-      setStreaming(false);
-      addMessage({
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: "Network error. Please check your connection and try again.",
-        createdAt: new Date().toISOString(),
-      });
-    }
+    await streamSend({
+      message: trimmed,
+      conversationId,
+      mode: mode as "chat" | "build",
+      attachments: readyAttachments.length > 0 ? readyAttachments : undefined,
+    });
   }, [
-    value,
-    isStreaming,
-    conversationId,
-    mode,
-    addMessage,
-    setStreaming,
-    appendStreamContent,
-    clearStreamContent,
-    finalizeStream,
-    onFilesGenerated,
-    router,
-    getToken,
-    pendingAttachments,
+    value, isStreaming, conversationId, mode, addMessage, setStreamingFlag,
+    clearStreamContent, streamSend, pendingAttachments,
   ]);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -295,7 +210,6 @@ export function ChatInput({
     }
   };
 
-  // Auto-resize textarea
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setValue(e.target.value);
     const el = e.target;
