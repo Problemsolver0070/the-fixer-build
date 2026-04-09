@@ -35,29 +35,22 @@ const BUILD_MODE_SYSTEM = `${FIXER_IDENTITY}
 MODE: BUILD
 You are generating a web application for the user. Output working, production-quality code.
 
-OUTPUT FORMAT:
-When generating or modifying files, wrap ALL file outputs in a single <bricks-files> tag containing a JSON array:
-
-<bricks-files>
-[
-  { "path": "index.html", "content": "<!DOCTYPE html>..." },
-  { "path": "style.css", "content": "body { ... }" },
-  { "path": "app.js", "content": "console.log('hello');" }
-]
-</bricks-files>
+FILE OUTPUT:
+Use the write_files tool to create or modify files. Always output complete, runnable files — no truncation, no "// rest of code here" comments.
 
 RULES:
-- Always output complete, runnable files. No truncation, no "// rest of code here" comments.
 - Use modern, clean code: ES modules, CSS custom properties, semantic HTML.
 - Default stack: vanilla HTML/CSS/JS unless the user requests a framework.
 - If a user describes a change, output ALL affected files in full (not just the diff).
 - Include helpful comments in the code to explain key decisions.
-- Before the <bricks-files> block, briefly explain what you're building and any key decisions you made.
-- After the <bricks-files> block, offer 2-3 suggestions for what to build next.`;
+- Before writing files, briefly explain what you're building and any key decisions you made.
+- After writing files, offer 2-3 suggestions for what to build next.`;
 
 // ─── Message Builder ──────────────────────────────────────────────────────────
 
 import type { ContentBlock } from "@/lib/ai/attachments";
+import type { MessageParam } from "@anthropic-ai/sdk/resources/messages";
+import type { ToolUseRecord } from "@/lib/ai/types";
 
 export interface ChatMessage {
   role: "user" | "assistant";
@@ -89,6 +82,82 @@ export function buildChatMessages(
   ];
 
   return { system, messages };
+}
+
+// ─── Tool History Reconstruction ─────────────────────────────────────────────
+
+interface StoredMessage {
+  role: "user" | "assistant";
+  content: string;
+  metadata?: {
+    toolUses?: ToolUseRecord[];
+    [key: string]: unknown;
+  } | null;
+}
+
+/**
+ * Reconstructs tool use history into the multi-message format the Anthropic API expects.
+ *
+ * A stored assistant message with toolUses in metadata must be expanded into:
+ *   1. Assistant message with text + tool_use content blocks
+ *   2. User message with tool_result content blocks
+ */
+export function reconstructToolHistory(messages: StoredMessage[]): MessageParam[] {
+  const result: MessageParam[] = [];
+
+  for (const msg of messages) {
+    if (msg.role === "assistant" && msg.metadata?.toolUses?.length) {
+      const contentBlocks: unknown[] = [];
+
+      if (msg.content) {
+        contentBlocks.push({
+          type: "text" as const,
+          text: msg.content,
+        });
+      }
+
+      const toolResultBlocks: unknown[] = [];
+      for (const toolUse of msg.metadata.toolUses) {
+        let parsedInput: unknown = {};
+        try {
+          parsedInput = JSON.parse(toolUse.input);
+        } catch {
+          // Keep empty object if input is not valid JSON
+        }
+
+        contentBlocks.push({
+          type: "tool_use" as const,
+          id: toolUse.toolUseId,
+          name: toolUse.name,
+          input: parsedInput,
+        });
+
+        toolResultBlocks.push({
+          type: "tool_result" as const,
+          tool_use_id: toolUse.toolUseId,
+          content: toolUse.result,
+          ...(toolUse.isError && { is_error: true }),
+        });
+      }
+
+      result.push({
+        role: "assistant" as const,
+        content: contentBlocks as MessageParam["content"],
+      });
+
+      result.push({
+        role: "user" as const,
+        content: toolResultBlocks as MessageParam["content"],
+      });
+    } else {
+      result.push({
+        role: msg.role,
+        content: msg.content,
+      } as MessageParam);
+    }
+  }
+
+  return result;
 }
 
 export { FIXER_IDENTITY, CHAT_MODE_SYSTEM, BUILD_MODE_SYSTEM };
