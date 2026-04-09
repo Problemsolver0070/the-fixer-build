@@ -30,13 +30,19 @@ export async function GET(_req: NextRequest, context: RouteContext) {
     const messages = await getMessages(id, dbUser.id);
 
     return NextResponse.json(
-      messages.map((m) => ({
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        attachments: m.attachments ?? null,
-        createdAt: m.createdAt.toISOString(),
-      }))
+      messages.map((m) => {
+        const meta = m.metadata as Record<string, unknown> | null;
+        return {
+          id: m.id,
+          role: m.role,
+          content: m.content,
+          attachments: m.attachments ?? null,
+          createdAt: m.createdAt.toISOString(),
+          thinkingContent: meta?.thinkingContent ?? undefined,
+          thinkingDurationMs: meta?.thinkingDurationMs ?? undefined,
+          citations: meta?.citations ?? undefined,
+        };
+      })
     );
   } catch (error) {
     console.error("GET /api/conversations/[id]/messages error:", error);

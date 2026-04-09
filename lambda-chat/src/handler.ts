@@ -16,7 +16,6 @@ import { buildChatMessages, type ChatMessage } from "@/lib/ai/prompts";
 import { buildContentBlocks, summarizeAttachments } from "@/lib/ai/attachments";
 import { streamChat } from "@/lib/ai/stream-handler";
 import type { Attachment } from "@/lib/types/attachment";
-import type { MessageMetadata } from "@/lib/ai/types";
 
 // --- Helpers ----------------------------------------------------------------
 

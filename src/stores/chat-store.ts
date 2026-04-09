@@ -25,6 +25,7 @@ interface StreamingState {
   activeBlock: "thinking" | "text" | null;
   citations: Citation[];
   thinkingStartedAt: number | null;
+  thinkingDurationMs: number | null;
 }
 
 const EMPTY_STREAMING: StreamingState = {
@@ -33,6 +34,7 @@ const EMPTY_STREAMING: StreamingState = {
   activeBlock: null,
   citations: [],
   thinkingStartedAt: null,
+  thinkingDurationMs: null,
 };
 
 // ─── Store ───────────────────────────────────────────────────────────────────
@@ -116,6 +118,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ...state.streaming,
         activeBlock: null,
         thinkingStartedAt: null,
+        thinkingDurationMs: durationMs,
       },
     })),
 
@@ -140,9 +143,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             createdAt: new Date().toISOString(),
             thinkingContent: streaming.thinkingContent || undefined,
             thinkingDurationMs: streaming.thinkingContent
-              ? (state.streaming.thinkingStartedAt
-                ? Date.now() - state.streaming.thinkingStartedAt
-                : undefined)
+              ? (streaming.thinkingDurationMs ?? undefined)
               : undefined,
             citations: streaming.citations.length > 0
               ? streaming.citations

@@ -119,7 +119,7 @@ export function ChatInput({
         }
       },
       onError: (message) => {
-        finalizeStream(crypto.randomUUID());
+        clearStreamContent();
         addMessage({
           id: crypto.randomUUID(),
           role: "assistant",
