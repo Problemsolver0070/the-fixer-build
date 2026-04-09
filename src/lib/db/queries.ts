@@ -151,7 +151,8 @@ export async function createMessage(
   role: string,
   content: string,
   attachments?: Attachment[] | null,
-  userId?: string
+  userId?: string,
+  metadata?: Record<string, unknown> | null
 ): Promise<Message> {
   if (userId) {
     const conv = await getConversation(conversationId, userId);
@@ -167,6 +168,7 @@ export async function createMessage(
       role,
       content,
       ...(attachments ? { attachments } : {}),
+      ...(metadata ? { metadata } : {}),
     })
     .returning();
 

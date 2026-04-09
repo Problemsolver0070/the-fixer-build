@@ -65,6 +65,7 @@ export const messages = pgTable(
     role: text("role").notNull(),
     content: text("content").notNull(),
     attachments: jsonb("attachments").$type<Attachment[] | null>().default(null),
+    metadata: jsonb("metadata"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
