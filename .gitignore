@@ -6,3 +6,6 @@ node_modules/
 *.tsbuildinfo
 next-env.d.ts
 drizzle/meta/
+
+# Lambda build output
+lambda-chat/dist/
