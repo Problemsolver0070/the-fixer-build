@@ -12,6 +12,12 @@ export type SSEEvent =
   | { type: "thinking_delta"; content: string }
   | { type: "thinking_done"; durationMs: number }
   | { type: "citation"; index: number; cited_text: string; source: CitationSource }
+  | { type: "tool_start"; name: string; toolUseId: string }
+  | { type: "tool_input_delta"; content: string }
+  | { type: "tool_done"; name: string; toolUseId: string }
+  | { type: "tool_result"; name: string; toolUseId: string; content: string; isError?: boolean }
+  | { type: "image"; base64: string; mediaType: string }
+  | { type: "files"; files: { path: string; content: string }[] }
   | { type: "done" }
   | { type: "error"; message: string };
 
@@ -32,6 +38,26 @@ export interface Citation {
   source: CitationSource;
 }
 
+// ─── Tool Use Types ─────────────────────────────────────────────────────────
+
+export interface ToolUseRecord {
+  toolUseId: string;
+  name: string;
+  input: string;      // JSON string of tool input
+  result: string;
+  isError?: boolean;
+}
+
+export interface ImageRecord {
+  base64: string;
+  mediaType: string;
+}
+
+export interface FileRecord {
+  path: string;
+  content: string;
+}
+
 // ─── Message Metadata ────────────────────────────────────────────────────────
 // Stored in the `metadata` JSONB column on the messages table.
 
@@ -39,6 +65,8 @@ export interface MessageMetadata {
   thinkingContent?: string;
   thinkingDurationMs?: number;
   citations?: Citation[];
+  toolUses?: ToolUseRecord[];
+  images?: ImageRecord[];
 }
 
 // ─── Stream Handler Options ──────────────────────────────────────────────────
@@ -47,4 +75,5 @@ export interface StreamOptions {
   thinking?: boolean;
   caching?: boolean;
   citations?: boolean;
+  tools?: boolean;      // default true — enable tool use
 }
