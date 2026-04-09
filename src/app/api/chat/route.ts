@@ -2,14 +2,9 @@ export const maxDuration = 120;
 
 import { auth } from "@clerk/nextjs/server";
 import { NextRequest } from "next/server";
-import { getClient, MODEL } from "@/lib/ai/client";
 import { buildChatMessages, type ChatMessage } from "@/lib/ai/prompts";
-import {
-  sanitizeStreamChunk,
-  sanitizeResponse,
-  flushBuffer,
-} from "@/lib/ai/sanitizer";
 import { buildContentBlocks, summarizeAttachments } from "@/lib/ai/attachments";
+import { streamChat } from "@/lib/ai/stream-handler";
 import type { Attachment } from "@/lib/types/attachment";
 import {
   getUserByClerkId,
@@ -61,10 +56,9 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // 3. Access check (trial / purchased time)
+    // 3. Access check
     const canAccess = await hasAccessCheck(dbUser);
     if (!canAccess) {
-      // Transition plan to 'expired' if not already
       if (dbUser.plan !== "trial" && dbUser.plan !== "expired") {
         await updateUserPlan(dbUser.id, "expired");
       }
@@ -97,7 +91,6 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    // Validate input sizes
     if (trimmedMessage.length > 50_000) {
       return new Response(
         JSON.stringify({ error: "Message too long (max 50,000 characters)" }),
@@ -111,7 +104,6 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Validate attachment ownership
     if (incomingAttachments?.length) {
       const prefix = `uploads/${dbUser.id}/`;
       for (const att of incomingAttachments) {
@@ -124,11 +116,10 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Validate mode at runtime
     const validModes = ["chat", "build"];
     const safeMode = validModes.includes(mode) ? mode : "chat";
 
-    // 5. Conversation — create if needed
+    // 5. Conversation
     let conversationId = incomingConversationId;
     let isFirstMessage = false;
 
@@ -155,9 +146,8 @@ export async function POST(req: NextRequest) {
       dbUser.id
     );
 
-    // 7. Load last 50 messages as history
+    // 7. Load history
     const recentMessages = await getMessages(conversationId, dbUser.id, 50);
-    // History = all recent messages except the last one (the user message we just saved)
     const history: ChatMessage[] = recentMessages.slice(0, -1).map((m) => ({
       role: m.role as "user" | "assistant",
       content: summarizeAttachments(m.content, m.attachments as Attachment[] | null),
@@ -171,7 +161,7 @@ export async function POST(req: NextRequest) {
       { userName: dbUser.name ?? undefined }
     );
 
-    // 8b. Build content blocks for current message's attachments
+    // 8b. Attachment content blocks
     if (incomingAttachments?.length) {
       const lastMsg = msgs[msgs.length - 1];
       if (lastMsg.role === "user") {
@@ -182,87 +172,60 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // 9. Stream response via SSE
+    // 9. Stream response via shared handler
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
-        // Send conversation ID immediately
         controller.enqueue(
-          encoder.encode(
-            sseEvent({ type: "conversation_id", id: conversationId })
-          )
+          encoder.encode(sseEvent({ type: "conversation_id", id: conversationId }))
         );
 
-        let fullRawContent = "";
-        const buffer = { value: "" };
+        const generator = streamChat({
+          systemPrompt,
+          messages: msgs,
+          mode: safeMode as "chat" | "build",
+        });
+
+        let result: { content: string; thinkingContent?: string; thinkingDurationMs?: number; citations?: unknown[] } | undefined;
 
         try {
-          const response = getClient().messages.stream({
-            model: MODEL,
-            max_tokens: safeMode === "build" ? 100000 : 16000,
-            system: systemPrompt,
-            messages: msgs,
-          });
-
-          for await (const event of response) {
-            if (
-              event.type === "content_block_delta" &&
-              event.delta.type === "text_delta"
-            ) {
-              const rawChunk = event.delta.text;
-              fullRawContent += rawChunk;
-
-              const sanitized = sanitizeStreamChunk(rawChunk, buffer);
-              if (sanitized) {
-                controller.enqueue(
-                  encoder.encode(sseEvent({ type: "text", content: sanitized }))
-                );
-              }
+          while (true) {
+            const { done, value } = await generator.next();
+            if (done) {
+              result = value;
+              break;
             }
+            // Forward each SSE event to the client
+            controller.enqueue(encoder.encode(sseEvent(value as unknown as Record<string, unknown>)));
           }
 
-          // Flush remaining buffer
-          const remaining = flushBuffer(buffer);
-          if (remaining) {
-            controller.enqueue(
-              encoder.encode(sseEvent({ type: "text", content: remaining }))
+          // Save assistant message to DB
+          if (result) {
+            const metadata: Record<string, unknown> = {};
+            if (result.thinkingContent) metadata.thinkingContent = result.thinkingContent;
+            if (result.thinkingDurationMs) metadata.thinkingDurationMs = result.thinkingDurationMs;
+            if (result.citations && result.citations.length > 0) metadata.citations = result.citations;
+
+            await createMessage(
+              conversationId!,
+              "assistant",
+              result.content,
+              null,
+              dbUser.id,
+              Object.keys(metadata).length > 0 ? metadata : null
             );
           }
-
-          // Save the full sanitized assistant message to DB
-          const sanitizedFull = sanitizeResponse(fullRawContent);
-          await createMessage(conversationId!, "assistant", sanitizedFull, null, dbUser.id);
 
           // Auto-title on first message
           if (isFirstMessage) {
-            const trimmed = trimmedMessage;
-            const title =
-              trimmed.length > 60 ? trimmed.slice(0, 60) + "..." : trimmed;
-            await updateConversationTitle(
-              conversationId!,
-              dbUser.id,
-              title
-            );
-            controller.enqueue(
-              encoder.encode(sseEvent({ type: "title", title }))
-            );
+            const title = trimmedMessage.length > 60
+              ? trimmedMessage.slice(0, 60) + "..."
+              : trimmedMessage;
+            await updateConversationTitle(conversationId!, dbUser.id, title);
+            controller.enqueue(encoder.encode(sseEvent({ type: "title", title })));
           }
-
-          controller.enqueue(encoder.encode(sseEvent({ type: "done" })));
         } catch (err) {
-          console.error("AI stream error:", err);
-
-          // Flush buffer on error
-          flushBuffer(buffer);
-
-          controller.enqueue(
-            encoder.encode(
-              sseEvent({
-                type: "error",
-                message: "Something went wrong. Please try again.",
-              })
-            )
-          );
+          console.error("Stream processing error:", err);
         } finally {
           controller.close();
         }
