@@ -28,9 +28,8 @@ export function ChatMessages() {
     if (isNearBottom.current) {
       bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     }
-  }, [messages, streaming.content, streaming.thinkingContent]);
+  }, [messages, streaming.content, streaming.thinkingContent, streaming.activeTool]);
 
-  // Empty state
   if (messages.length === 0 && !isStreaming) {
     return (
       <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
@@ -49,14 +48,20 @@ export function ChatMessages() {
     );
   }
 
-  // Determine if we should show the streaming message
   const showStreamingMessage =
     isStreaming &&
-    (streaming.content || streaming.thinkingContent || streaming.activeBlock === "thinking");
+    (streaming.content ||
+      streaming.thinkingContent ||
+      streaming.activeBlock === "thinking" ||
+      streaming.activeBlock === "tool" ||
+      streaming.toolResults.length > 0);
 
-  // Show waiting indicator only when streaming but nothing received yet
   const showWaiting =
-    isStreaming && !streaming.content && !streaming.thinkingContent && streaming.activeBlock === null;
+    isStreaming &&
+    !streaming.content &&
+    !streaming.thinkingContent &&
+    streaming.activeBlock === null &&
+    streaming.toolResults.length === 0;
 
   return (
     <div ref={containerRef} className="flex-1 overflow-y-auto">
@@ -70,10 +75,11 @@ export function ChatMessages() {
             thinkingContent={msg.thinkingContent}
             thinkingDurationMs={msg.thinkingDurationMs}
             citations={msg.citations}
+            toolResults={msg.toolResults}
+            images={msg.images}
           />
         ))}
 
-        {/* Waiting indicator (before any content arrives) */}
         {showWaiting && (
           <div className="flex gap-3 px-4 py-3">
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -90,7 +96,6 @@ export function ChatMessages() {
           </div>
         )}
 
-        {/* Currently streaming message (thinking + text) */}
         {showStreamingMessage && (
           <MessageBubble
             role="assistant"
@@ -99,6 +104,9 @@ export function ChatMessages() {
             thinkingContent={streaming.thinkingContent || undefined}
             isThinkingStreaming={streaming.activeBlock === "thinking"}
             citations={streaming.citations.length > 0 ? streaming.citations : undefined}
+            toolResults={streaming.toolResults.length > 0 ? streaming.toolResults : undefined}
+            images={streaming.images.length > 0 ? streaming.images : undefined}
+            activeTool={streaming.activeTool}
           />
         )}
 
