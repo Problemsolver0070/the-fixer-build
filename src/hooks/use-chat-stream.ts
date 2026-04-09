@@ -18,6 +18,15 @@ export interface ChatStreamCallbacks {
   onThinkingDelta?: (content: string) => void;
   onThinkingDone?: (durationMs: number) => void;
   onCitation?: (citation: Citation) => void;
+
+  // Phase 2: Tool events
+  onToolStart?: (name: string, toolUseId: string) => void;
+  onToolInputDelta?: (content: string) => void;
+  onToolDone?: (name: string, toolUseId: string) => void;
+  onToolResult?: (name: string, toolUseId: string, content: string, isError?: boolean) => void;
+  onImage?: (base64: string, mediaType: string) => void;
+  onFiles?: (files: { path: string; content: string }[]) => void;
+
   onDone: () => void;
   onError: (message: string) => void;
 }
@@ -37,7 +46,6 @@ export function useChatStream(
 ) {
   const [isStreaming, setIsStreaming] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
-  // Store callbacks in a ref to avoid stale closures without re-creating sendMessage
   const cbRef = useRef(callbacks);
   cbRef.current = callbacks;
 
@@ -66,7 +74,6 @@ export function useChatStream(
           signal: abortRef.current.signal,
         });
 
-        // Handle non-streaming errors
         if (!res.ok) {
           const errorData = await res.json().catch(() => null);
           const errorMsg = res.status === 402
@@ -77,7 +84,6 @@ export function useChatStream(
           return;
         }
 
-        // Read SSE stream
         const reader = res.body?.getReader();
         if (!reader) {
           cb.onError("No response stream");
@@ -126,6 +132,25 @@ export function useChatStream(
                     source: data.source as CitationSource,
                   });
                   break;
+                // Phase 2: Tool events
+                case "tool_start":
+                  cb.onToolStart?.(data.name, data.toolUseId);
+                  break;
+                case "tool_input_delta":
+                  cb.onToolInputDelta?.(data.content);
+                  break;
+                case "tool_done":
+                  cb.onToolDone?.(data.name, data.toolUseId);
+                  break;
+                case "tool_result":
+                  cb.onToolResult?.(data.name, data.toolUseId, data.content, data.isError);
+                  break;
+                case "image":
+                  cb.onImage?.(data.base64, data.mediaType);
+                  break;
+                case "files":
+                  cb.onFiles?.(data.files);
+                  break;
                 case "done":
                   cb.onDone();
                   setIsStreaming(false);
@@ -141,7 +166,6 @@ export function useChatStream(
           }
         }
 
-        // Stream ended without a done event — finalize anyway
         cb.onDone();
       } catch (err) {
         if ((err as Error).name === "AbortError") {
