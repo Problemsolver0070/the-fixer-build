@@ -11,6 +11,7 @@ import { AttachmentButton, uploadFile } from "./attachment-button";
 import { AttachmentPreview } from "./attachment-preview";
 import type { PendingAttachment, Attachment } from "@/lib/types/attachment";
 import { detectCategory, isAllowedFile, MAX_FILE_SIZE } from "@/lib/types/attachment";
+import type { ToolUseRecord } from "@/lib/ai/types";
 
 interface ChatInputProps {
   conversationId?: string;
@@ -40,6 +41,13 @@ export function ChatInput({
   const appendThinkingContent = useChatStore((s) => s.appendThinkingContent);
   const finishThinking = useChatStore((s) => s.finishThinking);
   const addCitation = useChatStore((s) => s.addCitation);
+  const startTool = useChatStore((s) => s.startTool);
+  const appendToolInput = useChatStore((s) => s.appendToolInput);
+  const addToolResult = useChatStore((s) => s.addToolResult);
+  const finishTool = useChatStore((s) => s.finishTool);
+  const addImage = useChatStore((s) => s.addImage);
+
+  const currentToolRef = useRef<{ name: string; toolUseId: string; input: string } | null>(null);
 
   const { sendMessage: streamSend, isStreaming } = useChatStream(
     {
@@ -54,9 +62,7 @@ export function ChatInput({
         fullContentRef.current += content;
         appendStreamContent(content);
       },
-      onTitle: () => {
-        // Title set server-side; layout will refresh
-      },
+      onTitle: () => {},
       onThinkingStart: () => {
         startThinking();
       },
@@ -69,11 +75,43 @@ export function ChatInput({
       onCitation: (citation) => {
         addCitation(citation);
       },
+      onToolStart: (name, toolUseId) => {
+        currentToolRef.current = { name, toolUseId, input: "" };
+        startTool(name, toolUseId);
+      },
+      onToolInputDelta: (content) => {
+        if (currentToolRef.current) {
+          currentToolRef.current.input += content;
+        }
+        appendToolInput(content);
+      },
+      onToolResult: (name, toolUseId, content, isError) => {
+        const record: ToolUseRecord = {
+          toolUseId,
+          name,
+          input: currentToolRef.current?.input || "",
+          result: content,
+          isError,
+        };
+        addToolResult(record);
+      },
+      onToolDone: () => {
+        currentToolRef.current = null;
+        finishTool();
+      },
+      onImage: (base64, mediaType) => {
+        addImage({ base64, mediaType });
+      },
+      onFiles: (files) => {
+        if (mode === "build" && onFilesGenerated) {
+          onFilesGenerated(files);
+        }
+      },
       onDone: () => {
         const assistantId = crypto.randomUUID();
         finalizeStream(assistantId);
 
-        // Parse <bricks-files> if in build mode
+        // Fallback: Parse <bricks-files> if in build mode and no files came via onFiles
         if (mode === "build" && onFilesGenerated) {
           try {
             const fullContent = fullContentRef.current;
@@ -172,7 +210,6 @@ export function ChatInput({
       .map((p) => p.attachment!);
     if ((!trimmed && readyAttachments.length === 0) || isStreaming) return;
 
-    // Add user message to store
     addMessage({
       id: crypto.randomUUID(),
       role: "user",
