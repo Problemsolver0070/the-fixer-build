@@ -212,7 +212,15 @@ export const handler = awslambda.streamifyResponse(
         mode: safeMode,
       });
 
-      let result: { content: string; thinkingContent?: string; thinkingDurationMs?: number; citations?: unknown[] } | undefined;
+      let result: {
+        content: string;
+        thinkingContent?: string;
+        thinkingDurationMs?: number;
+        citations?: unknown[];
+        toolUses?: unknown[];
+        images?: unknown[];
+        files?: unknown[];
+      } | undefined;
 
       try {
         while (true) {
@@ -230,6 +238,8 @@ export const handler = awslambda.streamifyResponse(
           if (result.thinkingContent) msgMetadata.thinkingContent = result.thinkingContent;
           if (result.thinkingDurationMs) msgMetadata.thinkingDurationMs = result.thinkingDurationMs;
           if (result.citations && result.citations.length > 0) msgMetadata.citations = result.citations;
+          if (result.toolUses && result.toolUses.length > 0) msgMetadata.toolUses = result.toolUses;
+          if (result.images && result.images.length > 0) msgMetadata.images = result.images;
 
           await createMessage(
             conversationId!,
