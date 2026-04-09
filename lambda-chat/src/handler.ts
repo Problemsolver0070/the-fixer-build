@@ -83,7 +83,6 @@ export const handler = awslambda.streamifyResponse(
       try {
         const payload = await verifyToken(token, {
           secretKey: process.env.CLERK_SECRET_KEY!,
-          issuer: "https://clerk.thefixer.in",
         });
         clerkUserId = payload.sub;
       } catch {
