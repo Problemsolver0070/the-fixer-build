@@ -186,7 +186,15 @@ export async function POST(req: NextRequest) {
           mode: safeMode as "chat" | "build",
         });
 
-        let result: { content: string; thinkingContent?: string; thinkingDurationMs?: number; citations?: unknown[] } | undefined;
+        let result: {
+          content: string;
+          thinkingContent?: string;
+          thinkingDurationMs?: number;
+          citations?: unknown[];
+          toolUses?: unknown[];
+          images?: unknown[];
+          files?: unknown[];
+        } | undefined;
 
         try {
           while (true) {
@@ -205,6 +213,8 @@ export async function POST(req: NextRequest) {
             if (result.thinkingContent) metadata.thinkingContent = result.thinkingContent;
             if (result.thinkingDurationMs) metadata.thinkingDurationMs = result.thinkingDurationMs;
             if (result.citations && result.citations.length > 0) metadata.citations = result.citations;
+            if (result.toolUses && result.toolUses.length > 0) metadata.toolUses = result.toolUses;
+            if (result.images && result.images.length > 0) metadata.images = result.images;
 
             await createMessage(
               conversationId!,

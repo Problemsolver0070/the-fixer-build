@@ -41,6 +41,8 @@ export async function GET(_req: NextRequest, context: RouteContext) {
           thinkingContent: meta?.thinkingContent ?? undefined,
           thinkingDurationMs: meta?.thinkingDurationMs ?? undefined,
           citations: meta?.citations ?? undefined,
+          toolResults: meta?.toolUses ?? undefined,
+          images: meta?.images ?? undefined,
         };
       })
     );
