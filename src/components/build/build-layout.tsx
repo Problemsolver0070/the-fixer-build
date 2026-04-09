@@ -141,6 +141,21 @@ export function BuildLayout({
       onThinkingDelta: () => {},
       onThinkingDone: () => {},
       onCitation: () => {},
+      onToolStart: () => {},
+      onToolInputDelta: () => {},
+      onToolDone: () => {},
+      onToolResult: () => {},
+      onImage: () => {},
+      onFiles: (files) => {
+        // Primary path: structured files from write_files tool
+        const filesMap: Record<string, string> = {};
+        for (const f of files) {
+          filesMap[f.path] = f.content;
+        }
+        if (Object.keys(filesMap).length > 0) {
+          handleFilesGenerated(filesMap);
+        }
+      },
       onDone: () => {
         const extractedFiles = extractFilesFromResponse(fullContentRef.current);
         if (extractedFiles && Object.keys(extractedFiles).length > 0) {
